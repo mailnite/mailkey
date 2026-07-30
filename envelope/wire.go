@@ -63,6 +63,14 @@ func Unmarshal(raw []byte) (*Envelope, error) {
 	if !ok || val.Kind() != value.MAP {
 		return nil, xerrors.New("envelope: expected a map")
 	}
+	// Unknown is fatal here too: an unrecognized field could be a future
+	// suite's parameter we would otherwise ignore while decrypting as if we
+	// understood the whole object. Extra fields are also outside the AAD, so
+	// accepting them would create unauthenticated space inside an envelope.
+	if err := exactFields(m, "v", "suite", "domain", "kid", "manifest_id",
+		"alg", "enc", "ephemeral_pk", "nonce", "ciphertext"); err != nil {
+		return nil, err
+	}
 	ver, err := longAt(m, "v")
 	if err != nil {
 		return nil, err
@@ -139,6 +147,19 @@ func UnmarshalBase64(s string) (*Envelope, error) {
 		return nil, xerrors.Errorf("envelope: base64: %w", err)
 	}
 	return Unmarshal(b)
+}
+
+// exactFields requires the map to carry exactly the named keys.
+func exactFields(m value.Map, want ...string) error {
+	if keys := m.Keys(); len(keys) != len(want) {
+		return xerrors.Errorf("envelope: expected %d fields, got %d", len(want), len(keys))
+	}
+	for _, k := range want {
+		if m.Get(k) == nil {
+			return xerrors.Errorf("envelope: missing field %q", k)
+		}
+	}
+	return nil
 }
 
 func utf8At(m value.Map, key string) (string, error) {

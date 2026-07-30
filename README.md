@@ -56,6 +56,7 @@ order.
 | `mailkey/discovery` | domain normalization, derived names, DNS/header parsing |
 | `mailkey/envelope` | the sealed message, with every identifier bound as AEAD associated data |
 | `mailkey/resolver` | the hardened HTTPS authority client — the only code that installs a key |
+| `mailkey/peer` | Peer state, observation reconciliation, the in-memory store and the service |
 
 The root package is interfaces only — `Resolver`, `Store`, `Service`,
 `PrivateKeyLookup`, `Publisher` — so a component-based application injects the
@@ -130,9 +131,9 @@ constants is a protocol change.
 ## Status
 
 Draft. Implemented and tested: the wire format and identifiers (pinned by golden
-vectors), the envelope suite, and the hardened HTTPS resolver. In progress: the
-Peer store and reconciliation service, the glue components, and the Mailnite
-integration — see [`ROADMAP.md`](ROADMAP.md).
+vectors), the envelope suite, the hardened HTTPS resolver, and the Peer state
+machine with its store and service. In progress: the glue components and the
+Mailnite integration — see [`ROADMAP.md`](ROADMAP.md).
 
 ## License
 

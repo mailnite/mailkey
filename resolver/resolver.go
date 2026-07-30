@@ -42,6 +42,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -372,11 +373,12 @@ func cacheUntil(expiresAt, now time.Time, cacheControl string) time.Time {
 	if cacheControl == "" {
 		return expiresAt
 	}
-	for _, part := range splitList(cacheControl) {
-		k, v, ok := cut(part, "=")
-		if !ok || k != "max-age" {
+	for _, part := range strings.Split(cacheControl, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || strings.TrimSpace(k) != "max-age" {
 			continue
 		}
+		v = strings.TrimSpace(v)
 		secs, err := strconv.Atoi(v)
 		if err != nil || secs < 0 {
 			continue
@@ -414,35 +416,4 @@ func classifyTransportError(domain string, err error) error {
 		return mailkey.Fail(mailkey.FailureTLS, domain, err)
 	}
 	return mailkey.Fail(mailkey.FailureNetwork, domain, err)
-}
-
-func splitList(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == ',' {
-			out = append(out, trimSpace(s[start:i]))
-			start = i + 1
-		}
-	}
-	return out
-}
-
-func cut(s, sep string) (string, string, bool) {
-	for i := 0; i+len(sep) <= len(s); i++ {
-		if s[i:i+len(sep)] == sep {
-			return trimSpace(s[:i]), trimSpace(s[i+len(sep):]), true
-		}
-	}
-	return trimSpace(s), "", false
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
 }

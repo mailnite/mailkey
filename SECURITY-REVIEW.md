@@ -230,10 +230,10 @@ reason the retention floor must not become an unbounded archive.
 
 | # | Severity | Finding | Disposition |
 |---|---|---|---|
-| F-1 | **Critical** | Envelope AEAD uses nil AAD; metadata unauthenticated (spec §10 violation) | New MKDP1 envelope suite with AAD binding; legacy suite decrypt-only |
+| F-1 | **Critical** | Envelope AEAD uses nil AAD; metadata unauthenticated (spec §10 violation) | FIXED in both: mailkey's MKDP1 suite binds every identifier; **mailcore envelope v2** binds its routing metadata, v1 decrypt-only. The published mathematics page (§2.7) was updated ×8 — it had documented the nil-AAD construction, with a justification that was itself incomplete (the HKDF salt binds the keys, never `space`/`seq`) |
 | F-2 | High | Header path currently *installs* keys (`LearnPin`) | Clean break: header becomes observation-only; seq/conflict machinery removed |
 | F-3 | High | Header-triggered fetch is a remote SSRF/amplification primitive | Full resolver hardening (§3.4), private targets opt-in |
-| F-4 | Medium | Downgrade protection vs. observation-driven self-DoS | Fail-closed armed only by HTTPS/admin; hold-and-retry default |
+| F-4 | Medium | Downgrade protection vs. observation-driven self-DoS | Implemented in `peer`: a failed refresh never disturbs a valid manifest, `ResolveForEncryption` falls back to cache and otherwise reports `ErrNoKey` rather than deciding plaintext; fail-closed armed only by HTTPS/admin. The queue-side hold/fail policy is phase 8 |
 | F-5 | Medium | New always-public 443 endpoint | Dedicated well-known-only handler; relay/mux sharing like AcmeServer |
 | F-6 | Medium | `kid` remap would corrupt lookup silently | Refuse + alert as critical integrity error |
 | F-7 | Low | Parser hardening must not touch `value` globals | Structural validation + body cap; repack catches trailing bytes |

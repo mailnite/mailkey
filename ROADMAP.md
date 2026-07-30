@@ -49,18 +49,38 @@ remote attacker can trigger. Everything in the security review §3.4 lands here:
   request), timeouts, body caps before and after read, cache-lifetime bounding,
   and fuzz targets over every parser.
 
-## Phase 3 — Peer store and service
+## Phase 3 — Peer store and service ✅
 
 `mailkey/peer`: the state machine of `03-PEERS-AND-RESOLUTION.md`.
 
+- `peer/state.go` — the transitions as PURE FUNCTIONS over a `*mailkey.Peer`
+  (`Install`, `Observe`, `Reconcile`, `Fail`, `Usable`, `NeedsRefresh`,
+  `Forget`), so every Store backend shares one implementation of the semantics
+  and supplies only persistence and atomicity.
 - Observation reconciliation: confirmed / stale / inconsistent against the
   effective manifest id, with no winner-selection between untrusted sources.
+  Observations coalesce per source, so a mail flood cannot grow a record.
 - Atomic `InstallManifest` (persist → demote previous → set effective →
-  reconcile → update status).
-- Authority-instability detection (A/B/A/B within a window → warning, never an
-  ordering rule).
-- An in-memory `Store` for tests and small deployments; Mailnite supplies the
-  badger-backed one.
+  reconcile → update status), with history bounded so a flapping authority
+  cannot grow storage.
+- Authority-instability detection: A → B → A inside an hour is flagged, and the
+  latest fetch is still what is effective — no ordering rule invented.
+- Downgrade protection in code: `Fail` never disturbs a still-valid manifest,
+  and `ResolveForEncryption` falls back to a usable cached manifest when a due
+  refresh fails. It returns `ErrNoKey`/the failure rather than ever deciding to
+  send plaintext — that decision belongs to the caller's policy.
+- Bounded async discovery: header and DNS triggers enqueue onto a fixed-size
+  channel drained by N workers, coalesced per domain, and **dropped** when full
+  (a lost hint costs nothing; the next send resolves synchronously). Background
+  work gets its own context, never the inbound message's.
+- `peer/memstore.go` — the reference `mailkey.Store`: returns deep copies so a
+  caller cannot mutate stored state, refuses a result for another domain, and
+  keeps an administrative policy across `Forget` (a decision about the domain,
+  not a cache entry).
+- Cache honesty: serving from cache re-parses the stored canonical bytes, so a
+  record that no longer validates is refused rather than used.
+- 15 tests covering all of the above, including the central rule proven from
+  the outside (observations never install a key) and the bounded-queue storm.
 
 ## Phase 4 — glue components
 

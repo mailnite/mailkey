@@ -43,6 +43,7 @@ import (
 	"crypto/subtle"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/manifest"
 	"go.arpabet.com/value"
 	"golang.org/x/xerrors"
 )
@@ -206,9 +207,11 @@ func Open(recipientPriv []byte, e *Envelope) ([]byte, error) {
 
 // KeyIDOfPrivate computes the kid of a private key's public half — how a
 // receiver indexes its own keys, and how Open checks it was handed the right
-// one. It mirrors manifest.KeyIDOf; the preimage is identical by construction.
+// one. It delegates to manifest.KeyIDOf: the preimage must have exactly ONE
+// implementation, or a change to it would make senders and receivers compute
+// different identifiers for the same key.
 func KeyIDOfPrivate(domain, alg, enc string, priv *ecdh.PrivateKey) (mailkey.KeyID, error) {
-	return keyID(domain, alg, enc, priv.PublicKey().Bytes())
+	return manifest.KeyIDOf(domain, alg, enc, priv.PublicKey().Bytes())
 }
 
 // Validate checks a header's self-consistency before any crypto runs.
@@ -248,30 +251,6 @@ func (h Header) AAD() ([]byte, error) {
 		"enc":          value.Utf8(h.Encryption),
 		"ephemeral_pk": value.Raw(h.EphemeralPub, true),
 	}))
-}
-
-func keyID(domain, alg, enc string, publicKey []byte) (mailkey.KeyID, error) {
-	var out mailkey.KeyID
-	if domain == "" {
-		return out, xerrors.New("key id: empty domain")
-	}
-	if alg != mailkey.AlgX25519 || enc != mailkey.EncAES256GCM {
-		return out, xerrors.Errorf("key id: unsupported suite %s/%s", alg, enc)
-	}
-	if len(publicKey) != pubKeyLen {
-		return out, xerrors.Errorf("key id: public key must be %d bytes, got %d", pubKeyLen, len(publicKey))
-	}
-	raw, err := value.Pack(value.SortedMapOf(map[string]value.Value{
-		"type":   value.Utf8("mailkey-envelope-key-v1"),
-		"domain": value.Utf8(domain),
-		"alg":    value.Utf8(alg),
-		"enc":    value.Utf8(enc),
-		"pk":     value.Raw(publicKey, true),
-	}))
-	if err != nil {
-		return out, xerrors.Errorf("key id: pack: %w", err)
-	}
-	return sha256.Sum256(raw), nil
 }
 
 // deriveAEAD builds the AES-256-GCM cipher from the ECDH secret. Both public
