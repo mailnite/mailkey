@@ -153,15 +153,45 @@ Done in mailnite (the wiring the mailcore change requires):
 - `mailnite key lookup` now probes MKDP1 and prints the manifest id, kid and
   validity.
 
-## Phase 6 — Mailnite receiver and publisher
+## Phase 6 — Mailnite receiver and publisher ✅
 
-- Per-domain key generation computing `kid` at generation time; `kid → key`
-  mapping that **refuses** rebinding (F-6) and alerts through the notification
-  fabric.
-- Retired-key retention with the enforced floor: max manifest lifetime + max
-  delivery lifetime + skew (F-9). Retire, never delete.
-- Prebuilt canonical manifest bytes published atomically, so no client can see
-  a manifest naming a key the receiver cannot yet open.
+- **kid lookup is DERIVED, not stored** (`mailcore/service/key_mkdp.go`). A kid
+  is SHA-256 over (domain, alg, enc, public key), so the lookup recomputes it
+  from the stored key material and compares. That is stronger than the mapping
+  F-6 warned about: there is no stored association to corrupt, so a kid can
+  never name a key it was not derived from, and the F-6 alert has nothing to
+  fire on. `KeyByKid` is on `api.KeyService`; `FindPrivateKey` satisfies
+  `mailkey.PrivateKeyLookup`.
+- The trial walk is gone for MKDP1 mail: `DecryptFor` routes an MKDP1 envelope
+  to exactly one candidate generation. The walk survives ONLY for legacy
+  envelopes, which name a generation number rather than a key — dropping it
+  would strand mail already in mailboxes and queues.
+- The recipient domain selects the keyring from the LOCAL mailbox, and the
+  envelope's claimed domain must match it. An envelope for another domain is
+  left sealed rather than opened with a key it does not belong to.
+- **Retention floor enforced in code** (F-9): manifest lifetime + delivery
+  lifetime + margin (7 + 10 + 14 days). `RetTimestamp` records when a
+  generation retired, because retention is measured from retirement, not
+  creation — a key created long ago but retired a minute ago may still be
+  needed. An operator may LENGTHEN the window and cannot shorten it: a shorter
+  window is not a trade-off, it is data loss. A generation with no retirement
+  timestamp is kept rather than guessed about.
+- **Publisher** (`mailnite/pkg/server/mailkey_publisher.go`): per hosted domain,
+  the canonical manifest bytes and their id, built once and served verbatim —
+  the id is the hash of exactly those bytes, so re-serializing per request could
+  serve bytes whose hash differs from the id already advertised. It refuses to
+  publish for a domain this server does not host, for a domain with no key, and
+  for a key whose private half is not resolvable by the kid about to be
+  published (the state that would silently break every message sealed to it).
+- Tests: publish → validate as a peer would → seal → open by kid, all in one
+  process (the only way to prove the two halves agree); rotation with a delayed
+  message still opening; the derived-lookup properties (a kid does not resolve
+  under another domain's keyring, a fabricated kid resolves to nothing); the
+  retention floor.
+
+Remaining from this phase, moved to phase 7 where they belong: the `_mailkey`
+DNS record and the `Mail-Key` header both advertise the published manifest id,
+so they land with the endpoint that serves it.
 
 ## Phase 7 — the public 443 endpoint
 
