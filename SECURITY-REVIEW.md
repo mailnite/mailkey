@@ -242,6 +242,7 @@ reason the retention floor must not become an unbounded archive.
 | F-10 | Info | No CT, no pinned signing key | Documented accepted limitation |
 | F-11 | Medium | Domain normalization was not idempotent (a Punycode A-label whose decoded form is invalid normalized once, then failed on its own output) | `Normalize` verifies stability and rejects; found by fuzzing |
 | F-12 | Medium | Base64url identifiers had multiple valid spellings (unused trailing bits ignored), so one id could be advertised under different-looking strings | `DecodeID` requires the canonical spelling; found by fuzzing |
+| F-13 | Medium | At-rest private-key wrapping (`mailcore/service`) also used nil AAD, so a wrapped blob was anonymous ciphertext: it could be moved between records or generations and would still unwrap | `wrap`/`unwrap` bind (owner, seq) as associated data; clean break, no unbound fallback |
 
 ---
 
@@ -266,8 +267,22 @@ interoperability failure rather than an obvious break.
   manifest under a different-looking id and trigger pointless refreshes. The
   decoder now requires the input to re-encode to itself.
 
-The property that caught both is the same one the protocol depends on: *anything
-accepted must round-trip to exactly what was accepted*. That invariant is now
+**F-13 was found by auditing F-1's fix rather than by reasoning about the spec.**
+Having bound the envelope's metadata, the obvious question was where else this
+codebase encrypts something whose *name* lives outside the ciphertext — and the
+at-rest key wrapping did exactly that. A wrapped private key was anonymous
+ciphertext: anyone able to write to the store (a restored backup, a compromised
+replica, a buggy migration) could move one domain's wrapped key into another's
+record, or a retired generation's into the current slot, and it would unwrap
+perfectly. The server would then hold a key belonging to a different identity
+while believing it is this one — mail sealed to the real key stops opening, and
+the audit trail says something false about which key was used. `wrap`/`unwrap`
+now bind (owner, generation), with no unbound fallback: this is an at-rest
+format only we produce, so unlike the wire envelope there is no second party to
+stay compatible with.
+
+The property that caught F-11 and F-12 is the same one the protocol depends on:
+*anything accepted must round-trip to exactly what was accepted*. That invariant is now
 asserted by fuzz targets over the manifest parser, the identifier decoder,
 domain normalization and the header parser, and the failing inputs are kept as
 regression corpus.

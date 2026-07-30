@@ -43,7 +43,19 @@ package mailkey
 
 import (
 	"context"
+	"reflect"
 	"time"
+)
+
+// Interface classes, for dependency-injection containers that resolve beans by
+// interface type. A host looks the protocol up by what it DOES, never by which
+// implementation happens to provide it.
+var (
+	ResolverClass         = reflect.TypeOf((*Resolver)(nil)).Elem()
+	StoreClass            = reflect.TypeOf((*Store)(nil)).Elem()
+	ServiceClass          = reflect.TypeOf((*Service)(nil)).Elem()
+	PrivateKeyLookupClass = reflect.TypeOf((*PrivateKeyLookup)(nil)).Elem()
+	PublisherClass        = reflect.TypeOf((*Publisher)(nil)).Elem()
 )
 
 // Version is the protocol version token carried by every MKDP1 object.

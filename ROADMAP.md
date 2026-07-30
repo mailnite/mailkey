@@ -82,12 +82,30 @@ remote attacker can trigger. Everything in the security review §3.4 lands here:
 - 15 tests covering all of the above, including the central rule proven from
   the outside (observations never install a key) and the bounded-queue storm.
 
-## Phase 4 — glue components
+## Phase 4 — glue components ✅
 
-`mailkey/component`: thin beans for dependency-injection applications —
-`BeanName`, `PostConstruct`, `inject:""` tags — wrapping the phase 2 and 3
-implementations. The core packages stay free of the DI dependency so the library
-is usable without it; component apps get ready-made wiring.
+`mailkey/component`: two thin beans for dependency-injection applications.
+
+- `ResolverBean` builds the hardened resolver from properties (`mkdp.*`,
+  documented in the package comment), warns loudly when
+  `mkdp.security.allow-private-targets` widens the anti-SSRF policy, and reports
+  `ErrDisabled` rather than making requests when MKDP1 is switched off.
+- `ServiceBean` builds the peer service over an injected `mailkey.Resolver` and
+  the host's `mailkey.Store`. Both dependencies are INTERFACES, so a host
+  substitutes its own storage or resolver without touching protocol behavior;
+  a missing store falls back to the in-memory one with a warning rather than
+  failing silently. `PostConstruct` is re-entrant (an in-place restart reuses
+  bean instances, so the previous worker set is stopped first) and `Destroy` is
+  idempotent.
+- Interface classes (`mailkey.ResolverClass`, `StoreClass`, `ServiceClass`,
+  `PrivateKeyLookupClass`, `PublisherClass`) so a container resolves the
+  protocol by what it does, never by an implementation type.
+- The core packages stay free of the DI dependency: `mailkey`, `manifest`,
+  `discovery`, `envelope`, `resolver` and `peer` import only the standard
+  library, `value` and `xerrors`.
+- Tests build a real glue container and drive the protocol through the injected
+  interfaces, including the disabled switch, the missing-store fallback, the
+  restart/destroy lifecycle and property plumbing.
 
 ## Phase 5 — mailcore changes
 

@@ -57,11 +57,14 @@ order.
 | `mailkey/envelope` | the sealed message, with every identifier bound as AEAD associated data |
 | `mailkey/resolver` | the hardened HTTPS authority client — the only code that installs a key |
 | `mailkey/peer` | Peer state, observation reconciliation, the in-memory store and the service |
+| `mailkey/component` | optional glue beans, for dependency-injection applications |
 
 The root package is interfaces only — `Resolver`, `Store`, `Service`,
 `PrivateKeyLookup`, `Publisher` — so a component-based application injects the
 protocol rather than importing an implementation, and can supply its own
-storage, HTTP stack or HSM without weakening any validation.
+storage, HTTP stack or HSM without weakening any validation. In a
+dependency-injection application the `component` package provides ready beans;
+everything below it is DI-free and usable on its own.
 
 ## Using it
 
@@ -130,10 +133,10 @@ constants is a protocol change.
 
 ## Status
 
-Draft. Implemented and tested: the wire format and identifiers (pinned by golden
-vectors), the envelope suite, the hardened HTTPS resolver, and the Peer state
-machine with its store and service. In progress: the glue components and the
-Mailnite integration — see [`ROADMAP.md`](ROADMAP.md).
+Draft. The library is complete and tested: wire format and identifiers (pinned
+by golden vectors), the envelope suite, the hardened HTTPS resolver, the Peer
+state machine with its store and service, and the glue components. Remaining
+work is the Mailnite integration — see [`ROADMAP.md`](ROADMAP.md).
 
 ## License
 
