@@ -1,14 +1,14 @@
 {
   "envelope": {
-    "kid": "jO9hztR7nUn9IP1zTx6oYYmihBf4rNzHlqsysEtJd78",
-    "manifest_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c4208cef61ced47b9d49fd20fd734f1ea86189a28417f8acdcc796ab32b04b4977bfa2706bc420b63b1967ec04523dc65cf1b4a9e0444469110af724b3d0a161a10c1897614915a176a54d4b445031",
-    "manifest_id": "MthoNE94re_vBDSD37QKEwMDaWmW9v0H4HOiNp7Yo9k",
-    "note": "A DECRYPT vector: opening wire_base64 with recipient_private_hex must yield plaintext exactly. Sealing is not reproducible byte-for-byte \u2014 every envelope carries a fresh ephemeral key and nonce \u2014 so verification is by opening, and the header fields (domain, kid, manifest_id, suite) are authenticated as associated data.",
+    "kid": "j807hgKANFmOyFtfBqWWcZQbVHZhbRXj6B65wAZ6cAY",
+    "manifest_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c4208fcd3b86028034598ec85b5f06a59671941b5476616d15e3e81eb9c0067a7006a2706bc42091671135b359f74461095298cff46edcdcea120af5f81ff147bb6b74b51a6a7da176a54d4b445031",
+    "manifest_id": "W5EUew3pU-PA3S3g8ewk-O7zvjfYs1b1-Wx5OiHMsx8",
+    "note": "A DECRYPT vector: opening wire_base64 with recipient_private_hex must yield plaintext exactly. Sealing is not reproducible byte-for-byte — every envelope carries a fresh ephemeral key and nonce — so verification is by opening, and the header fields (domain, kid, manifest_id, suite) are authenticated as associated data.",
     "plaintext": "From: alice@sender.test\r\nTo: bob@example.com\r\nSubject: interop vector\r\n\r\nthe body\r\n",
-    "recipient_private_hex": "afbb45d5cf521df8205954145df1a0c7eb04bc9697b1060397f0ccab4999f515",
-    "recipient_public_hex": "b63b1967ec04523dc65cf1b4a9e0444469110af724b3d0a161a10c1897614915",
+    "recipient_private_hex": "4b213974d0424daf5cb161a14342300a28edea0c7140621e440697d76f879a4c",
+    "recipient_public_hex": "91671135b359f74461095298cff46edcdcea120af5f81ff147bb6b74b51a6a7d",
     "suite": "mkdp1-x25519-hkdf-sha256-aes256gcm",
-    "wire_base64": "iqNhbGemeDI1NTE5qmNpcGhlcnRleHTEY6VJ0bkr++fCEgfFyw7XSgMQalAChOSjpM1VRTYcBNRFREQhVv/1WKeNkE7t1CBoyNoVJGz5b3w5sCxlc4884meq5DJ0CtN+8dtM1xF8mUecbjFl7f9BMAwOZicC0cL5kT5a7qZkb21haW6rZXhhbXBsZS5jb22jZW5jqWFlczI1NmdjbaxlcGhlbWVyYWxfcGvEIJUbKQ2jGA1DnGtDzqcMKp6GrwUT/Bg2bTtyCbPpYNk6o2tpZMQgjO9hztR7nUn9IP1zTx6oYYmihBf4rNzHlqsysEtJd7+rbWFuaWZlc3RfaWTEIDLYaDRPeK3v7wQ0g9+0ChMDA2lplvb9B+Bzojae2KPZpW5vbmNlxAzUcWUn2cLeeJz2nMOlc3VpdGXZIm1rZHAxLXgyNTUxOS1oa2RmLXNoYTI1Ni1hZXMyNTZnY22hdgE="
+    "wire_base64": "iqNhbGemeDI1NTE5qmNpcGhlcnRleHTEY47UWzVZCg/c6a393Wv3qumpKTj0ZwIoL/4FFigwZbhIiQQTzd0wPy06SrI7Kl2AVch1JW3m4GByM8tMp5u9dKwpcL2lG76pNbRCHkQuroyC5+L8oK2GjvLy8dVCsnQcZ0waGKZkb21haW6rZXhhbXBsZS5jb22jZW5jqWFlczI1NmdjbaxlcGhlbWVyYWxfcGvEIDEHMAFyv7b6xVAq/ISKkC4yyIqhxy7zTfshp427YaMPo2tpZMQgj807hgKANFmOyFtfBqWWcZQbVHZhbRXj6B65wAZ6cAarbWFuaWZlc3RfaWTEIFuRFHsN6VPjwN0t4PHsJPju87432LNW9flseTohzLMfpW5vbmNlxAz1Whtdao9CT0dxeSalc3VpdGXZIm1rZHAxLXgyNTUxOS1oa2RmLXNoYTI1Ni1hZXMyNTZnY22hdgE="
   },
   "manifest": {
     "canonical_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c42042ca151eb3d40cf28b4c2e57b0038e670d702594217d8807caa48567c6257b7ea2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
@@ -25,11 +25,29 @@
       "public_key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
     },
     "kid": "QsoVHrPUDPKLTC5XsAOOZw1wJZQhfYgHyqSFZ8Yle34",
-    "kid_preimage_note": "kid = SHA-256(canonical pack of the sorted map {type:\"mailkey-envelope-key-v1\", domain, alg, enc, pk}) \u2014 the key names itself, so it is independent of timestamps and of the manifest carrying it.",
+    "kid_preimage_note": "kid = SHA-256(canonical pack of the sorted map {type:\"mailkey-envelope-key-v1\", domain, alg, enc, pk}) — the key names itself, so it is independent of timestamps and of the manifest carrying it.",
     "mail_key_header": "v=MKDP1; d=example.com; id=iErreOTszRhevJCaD56t1MfFP_EqAd3NsKsrfmERfpw; mode=https",
     "manifest_id": "iErreOTszRhevJCaD56t1MfFP_EqAd3NsKsrfmERfpw",
     "media_type": "application/msgpack",
     "well_known_path": "/.well-known/mail-key"
+  },
+  "message": {
+    "encrypted_value": "MKDP1",
+    "header_advertisement": "Mail-Key",
+    "header_encrypted": "Mail-Key-Encrypted",
+    "header_suite": "Mail-Key-Suite",
+    "inner": "From: alice@sender.test\r\nTo: bob@example.com\r\nDate: Mon, 30 Jul 2026 09:00:00 +0000\r\nMessage-Id: \u003cvector@sender.test\u003e\r\nSubject: the real subject is sealed\r\n\r\nthe body\r\n",
+    "note": "The MKDP1 mail framing. Opening sealed_base64 with the envelope vector's recipient_private_hex must yield inner exactly. Only the routing headers and a placeholder Subject are in the clear; the real Subject and every other header travel inside the sealed payload.",
+    "routing_headers": [
+      "From",
+      "To",
+      "Cc",
+      "Date",
+      "Message-Id",
+      "MIME-Version"
+    ],
+    "sealed_base64": "RnJvbTogYWxpY2VAc2VuZGVyLnRlc3QNClRvOiBib2JAZXhhbXBsZS5jb20NCkRhdGU6IE1vbiwgMzAgSnVsIDIwMjYgMDk6MDA6MDAgKzAwMDANCk1lc3NhZ2UtSWQ6IDx2ZWN0b3JAc2VuZGVyLnRlc3Q+DQpTdWJqZWN0OiBbRW5jcnlwdGVkIE1lc3NhZ2VdDQpDb250ZW50LVR5cGU6IHRleHQvcGxhaW47IGNoYXJzZXQ9dXRmLTgNCk1haWwtS2V5LVN1aXRlOiBta2RwMS14MjU1MTktaGtkZi1zaGEyNTYtYWVzMjU2Z2NtDQpNYWlsLUtleS1FbmNyeXB0ZWQ6IE1LRFAxDQoNCmlxTmhiR2VtZURJMU5URTVxbU5wY0dobGNuUmxlSFRFdUhFUFBaMnhHdUxEVFFFZlZPSFlxcVZPVy9IOWpqb1RDZzQ2OWZLa0NidEs2Z3VoTkdhTXlvZnB6a2VkckFKaGJJQ1hVR3o4Y21aOUN0NDBTam5YQXNNOU16dkd6V0ZQcnIwQWpaWUJpdVRsVHgwQ3BFNjR5bmt2V2hrejJZZmZ5MFhMaDRLWDB2bkk0TXFWakxjeGVrVlVxZ2doMmtRcEl6Slo0ZDFjMkJ3ZDIxWHc2dXdsUGNXK3loWjczWXQxNnQ4a2pUUFVCVUVrSXhnVkZ4SHF6cnpzYkcrb04yNE9aNW4xNG8wdjljcUkvVmFJNHJja3U2S21aRzl0WVdsdXEyVjRZVzF3YkdVdVkyOXRvMlZ1WTZsaFpYTXlOVFpuWTIyc1pYQm9aVzFsY21Gc1gzQnJ4Q0Q4V3d2L3dEdm45VE5IWVJwY0NCMWZZcS9uTkJMSWw2V09iMnY3NHhnZE9LTnJhV1RFSUkvTk80WUNnRFJaanNoYlh3YWxsbkdVRzFSMllXMFY0K2dldWNBR2VuQUdxMjFoYm1sbVpYTjBYMmxreENCYmtSUjdEZWxUNDhEZExlRHg3Q1Q0N3ZPK045aXpWdlg1YkhrNkljeXpINlZ1YjI1alpjUU1nVUl6a3k1QU5FNUx2Q3YzcFhOMWFYUmwyU0p0YTJSd01TMTRNalUxTVRrdGFHdGtaaTF6YUdFeU5UWXRZV1Z6TWpVMloyTnRvWFlCDQo=",
+    "subject_placeholder": "[Encrypted Message]"
   },
   "note": "Canonical MKDP1 vectors. An implementation that produces different canonical bytes, manifest_id or kid for the manifest input below is not MKDP1-compatible. Generated by mailkey; verified by TestPublishedVectors.",
   "protocol": "MKDP1"

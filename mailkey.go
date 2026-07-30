@@ -67,6 +67,31 @@ const Mode = "https"
 // HeaderName is the mail header that advertises MKDP1 capability.
 const HeaderName = "Mail-Key"
 
+// HeaderEncrypted marks a message whose body is an MKDP1 envelope. Its value is
+// the protocol version, so a reader learns WHICH protocol sealed the message
+// rather than merely that something did.
+const HeaderEncrypted = "Mail-Key-Encrypted"
+
+// HeaderSuite records the ciphersuite the envelope uses, so a receiver chooses
+// its parser from what the message declares instead of trying formats in turn.
+const HeaderSuite = "Mail-Key-Suite"
+
+/*
+None of the three carries an "X-" prefix, deliberately.
+
+RFC 6648 deprecated that convention in 2012, and for the situation this protocol
+is in: the prefix is meant to say "experimental", it becomes permanent the moment
+anything deploys it, and standardising then forces a rename that every
+implementation has to follow (X-Forwarded-For → Forwarded is the well-known
+casualty). A protocol that intends to be implemented more than once should not
+start by naming itself provisional.
+
+They are also not named after the product. A header called X-Mailnite-Encrypted
+would tell a reader which SOFTWARE sealed the message, which is the one thing
+about it that carries no meaning; Mail-Key-Encrypted names the protocol, which
+is what another implementation needs to know.
+*/
+
 // DNSPrefix is the label prefixed to a domain to form the TXT owner name.
 const DNSPrefix = "_mailkey"
 

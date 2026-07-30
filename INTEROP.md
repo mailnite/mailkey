@@ -23,6 +23,7 @@ none, because an implementer would chase a difference that is not in the protoco
 | `manifest.dns_txt_value` / `mail_key_header` | the two advertisement forms |
 | `manifest.discovery_url` / `well_known_path` / `media_type` | the transport contract |
 | `envelope.*` | a decrypt vector: private key, wire bytes, expected plaintext |
+| `message.*` | the mail framing: header names, the placeholder Subject, the routing headers left in the clear, and a sealed message that must open to `inner` |
 
 ## What an implementation must reproduce
 
@@ -99,6 +100,23 @@ Fuzzing has found three real defects that hand-written tests missed: `Normalize`
 was not idempotent (F-11), base64url identifiers had multiple spellings (F-12),
 and the envelope parser accepted non-canonical encodings — found while writing
 this gate. Corpora are committed under `testdata/fuzz/` as regression seeds.
+
+## The three headers
+
+```text
+Mail-Key            v=MKDP1; d=<domain>; id=<manifest id>; mode=https
+Mail-Key-Encrypted  MKDP1                  — what sealed this message
+Mail-Key-Suite      mkdp1-x25519-…         — which parser opens it
+```
+
+None carries an `X-` prefix. RFC 6648 deprecated that convention in 2012 for
+exactly this case: the prefix means "experimental", it becomes permanent the
+moment anything deploys it, and standardising then forces a rename every
+implementation must follow. A protocol meant to be implemented more than once
+should not begin by naming itself provisional.
+
+They are also not named after any product. A header saying which SOFTWARE sealed
+a message tells a reader the one thing about it that carries no meaning.
 
 ## Known limitations
 

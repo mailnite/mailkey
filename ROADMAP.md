@@ -118,7 +118,7 @@ Done in mailcore:
   copy of the envelope construction, which is the drift bug twice over.
 - `crypto/mkdp.go`: `SealMKDP1` / `OpenMKDP1` / `IsMKDP1` wrap a mailkey
   envelope in the same outer message shape. The legacy `Seal`/`Open` stay
-  DECRYPT-ONLY for mail already in a queue or mailbox; the `X-Mailnite-Alg`
+  DECRYPT-ONLY for mail already in a queue or mailbox; the `Mail-Key-Suite`
   header says which format a message carries, so the parser is chosen from the
   message rather than guessed.
 - The `seq`-ordered resolver chain is DELETED (`crypto/resolver.go`: DNSResolver,

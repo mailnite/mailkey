@@ -58,6 +58,7 @@ order.
 | `mailkey/resolver` | the hardened HTTPS authority client — the only code that installs a key |
 | `mailkey/peer` | Peer state, observation reconciliation, the in-memory store and the service |
 | `mailkey/wellknown` | the publishing endpoint: an `http.Handler` over a `Publisher`, with the caching, validator and method rules the protocol needs |
+| `mailkey/message` | the mail framing: how a sealed envelope rides inside an RFC 5322 message, and the `Mail-Key` advertisement header |
 | `mailkey/component` | optional glue beans, for dependency-injection applications |
 
 The root package is interfaces only — `Resolver`, `Store`, `Service`,

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/mailnite/mailkey/discovery"
 	"github.com/mailnite/mailkey/envelope"
 	"github.com/mailnite/mailkey/manifest"
+	"github.com/mailnite/mailkey/message"
 )
 
 /*
@@ -55,6 +57,16 @@ type vectorFile struct {
 		MediaType         string `json:"media_type"`
 		WellKnownPath     string `json:"well_known_path"`
 	} `json:"manifest"`
+	Message struct {
+		HeaderEncrypted     string   `json:"header_encrypted"`
+		HeaderSuite         string   `json:"header_suite"`
+		HeaderAdvertisement string   `json:"header_advertisement"`
+		EncryptedValue      string   `json:"encrypted_value"`
+		SubjectPlaceholder  string   `json:"subject_placeholder"`
+		RoutingHeaders      []string `json:"routing_headers"`
+		Inner               string   `json:"inner"`
+		SealedBase64        string   `json:"sealed_base64"`
+	} `json:"message"`
 	Envelope struct {
 		Suite               string `json:"suite"`
 		RecipientPrivateHex string `json:"recipient_private_hex"`
@@ -249,5 +261,66 @@ func TestPublishedEnvelopeVector(t *testing.T) {
 		if _, err := envelope.Open(priv, bad); err == nil {
 			t.Errorf("tampering with the %s must fail authentication", name)
 		}
+	}
+}
+
+/*
+TestPublishedMessageVector pins the mail FRAMING, which is protocol for the same
+reason the envelope is: two implementations that agree byte for byte on the
+sealed object still cannot exchange mail unless they agree on how it rides inside
+a message.
+
+The header names are checked against the constants, so renaming one without
+republishing the vectors fails here — and the secrecy assertion is the one that
+matters, because a framing that leaks the Subject would pass every round-trip
+test while failing its only real promise.
+*/
+func TestPublishedMessageVector(t *testing.T) {
+	v := loadVectors(t)
+	if mailkey.HeaderEncrypted != v.Message.HeaderEncrypted ||
+		mailkey.HeaderSuite != v.Message.HeaderSuite ||
+		mailkey.HeaderName != v.Message.HeaderAdvertisement {
+		t.Fatalf("header names differ from the published vector: %q/%q/%q vs %q/%q/%q",
+			mailkey.HeaderEncrypted, mailkey.HeaderSuite, mailkey.HeaderName,
+			v.Message.HeaderEncrypted, v.Message.HeaderSuite, v.Message.HeaderAdvertisement)
+	}
+	// No deprecated prefix and no product name — the reason these were renamed.
+	for _, h := range []string{mailkey.HeaderName, mailkey.HeaderEncrypted, mailkey.HeaderSuite} {
+		if strings.HasPrefix(strings.ToLower(h), "x-") {
+			t.Errorf("%q carries an X- prefix; RFC 6648 deprecated that convention", h)
+		}
+		if strings.Contains(strings.ToLower(h), "mailnite") {
+			t.Errorf("%q names the product rather than the protocol", h)
+		}
+	}
+	if message.SubjectPlaceholder != v.Message.SubjectPlaceholder {
+		t.Fatalf("subject placeholder = %q, published %q", message.SubjectPlaceholder, v.Message.SubjectPlaceholder)
+	}
+	if strings.Join(message.RoutingHeaders, ",") != strings.Join(v.Message.RoutingHeaders, ",") {
+		t.Fatalf("routing headers = %v, published %v", message.RoutingHeaders, v.Message.RoutingHeaders)
+	}
+
+	sealed, err := base64.StdEncoding.DecodeString(v.Message.SealedBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !message.IsEncrypted(sealed) {
+		t.Fatal("the published sealed message must be recognised as MKDP1")
+	}
+	// What must NOT be in the clear.
+	if strings.Contains(string(sealed), "the real subject is sealed") ||
+		strings.Contains(string(sealed), "the body") {
+		t.Fatal("the published framing leaks the Subject or the body")
+	}
+	priv, err := hex.DecodeString(v.Envelope.RecipientPrivateHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := message.Open(priv, sealed)
+	if err != nil {
+		t.Fatalf("the published sealed message must open with the published key: %v", err)
+	}
+	if string(got) != v.Message.Inner {
+		t.Fatalf("opened message differs from the published inner message:\n%q", got)
 	}
 }

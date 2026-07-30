@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Packages that carry the protocol. component/ is deliberately absent.
-core_pkgs=(. ./manifest ./discovery ./envelope ./resolver ./peer ./wellknown)
+core_pkgs=(. ./manifest ./discovery ./envelope ./resolver ./peer ./wellknown ./message)
 
 # Modules the protocol must never reach. glue is the DI container, zap the
 # logger; both belong to the host application's choices, not to the format.
