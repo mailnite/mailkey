@@ -351,6 +351,12 @@ func (r *Resolver) clientFor(domain, host string) *http.Client {
 // checkMediaType refuses a response whose declared type cannot be an MKDP1
 // manifest. A blank or octet-stream type is tolerated (the media type is a
 // SHOULD in the spec); an HTML error page served with status 200 is not.
+//
+// The list is deliberately permissive about which MessagePack spelling an
+// authority chose — including the vendor type MKDP1 used before settling on the
+// generic one — because the media type is a hint. What actually decides whether
+// a response is a manifest is the canonical parse that follows, and no content
+// type can talk its way past that.
 func checkMediaType(ct string) error {
 	if ct == "" {
 		return nil
@@ -360,7 +366,8 @@ func checkMediaType(ct string) error {
 		return xerrors.Errorf("unparsable content type %q", ct)
 	}
 	switch base {
-	case mailkey.MediaType, "application/octet-stream", "application/msgpack", "application/x-msgpack":
+	case mailkey.MediaType, "application/octet-stream", "application/x-msgpack",
+		"application/vnd.mailnite.mail-key+msgpack":
 		return nil
 	default:
 		return xerrors.Errorf("content type %q is not an MKDP1 manifest", base)

@@ -7,6 +7,7 @@
 package envelope
 
 import (
+	"bytes"
 	"encoding/base64"
 
 	"github.com/mailnite/mailkey"
@@ -127,6 +128,27 @@ func Unmarshal(raw []byte) (*Envelope, error) {
 	}
 	if err := e.Header.Validate(); err != nil {
 		return nil, err
+	}
+	// CANONICAL FORM: repack and require byte-identical input.
+	//
+	// Without this, several byte strings decode to the same envelope — a
+	// reordered map, a wider integer encoding, trailing bytes value.Unpack
+	// ignores. That matters here more than it looks, because the associated data
+	// is computed from the PARSED FIELDS: two encodings of one envelope
+	// authenticate identically, so the bytes on the wire would not be pinned by
+	// the tag that is supposed to protect them. Anything downstream that hashes,
+	// deduplicates or stores those bytes would then see two different messages
+	// where the protocol sees one.
+	//
+	// The same check guards manifests (manifest.ParseCanonical), for the same
+	// reason and with the same one-line consequence: exactly one encoding of an
+	// object is accepted, so there is nothing to disagree about.
+	again, err := e.Marshal()
+	if err != nil {
+		return nil, xerrors.Errorf("envelope: repack: %w", err)
+	}
+	if !bytes.Equal(raw, again) {
+		return nil, xerrors.New("envelope: not canonical (reordered, non-minimal, or trailing bytes)")
 	}
 	return e, nil
 }

@@ -1,0 +1,253 @@
+/*
+ *
+ * Copyright 2022-present Karagatan LLC. All rights reserved.
+ *
+ */
+
+package mailkey_test
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/envelope"
+	"github.com/mailnite/mailkey/manifest"
+)
+
+/*
+testdata/vectors.json is the PUBLISHED interoperability artifact — the file a
+third-party implementation is checked against, and the reason MKDP1 can have more
+than one implementation at all (test plan §10).
+
+This test exists to keep the file honest. Published vectors that drift from the
+code are worse than no vectors: an implementer would chase a difference that is
+not in the protocol. So every value in the file is recomputed here from the
+inputs the file itself states, and a mismatch fails — whichever side moved.
+
+Editing these values is a PROTOCOL CHANGE, not a test fix.
+*/
+
+type vectorFile struct {
+	Protocol string `json:"protocol"`
+	Manifest struct {
+		Input struct {
+			Domain       string `json:"domain"`
+			IssuedAt     int64  `json:"issued_at"`
+			ExpiresAt    int64  `json:"expires_at"`
+			Alg          string `json:"alg"`
+			Enc          string `json:"enc"`
+			PublicKeyHex string `json:"public_key_hex"`
+		} `json:"input"`
+		CanonicalBytesHex string `json:"canonical_bytes_hex"`
+		CanonicalBytesLen int    `json:"canonical_bytes_len"`
+		ManifestID        string `json:"manifest_id"`
+		Kid               string `json:"kid"`
+		DNSOwnerName      string `json:"dns_owner_name"`
+		DNSTxtValue       string `json:"dns_txt_value"`
+		MailKeyHeader     string `json:"mail_key_header"`
+		DiscoveryURL      string `json:"discovery_url"`
+		MediaType         string `json:"media_type"`
+		WellKnownPath     string `json:"well_known_path"`
+	} `json:"manifest"`
+	Envelope struct {
+		Suite               string `json:"suite"`
+		RecipientPrivateHex string `json:"recipient_private_hex"`
+		RecipientPublicHex  string `json:"recipient_public_hex"`
+		ManifestBytesHex    string `json:"manifest_bytes_hex"`
+		ManifestID          string `json:"manifest_id"`
+		Kid                 string `json:"kid"`
+		WireBase64          string `json:"wire_base64"`
+		Plaintext           string `json:"plaintext"`
+	} `json:"envelope"`
+}
+
+func loadVectors(t *testing.T) vectorFile {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/vectors.json")
+	if err != nil {
+		t.Fatalf("the published vectors must exist: %v", err)
+	}
+	var v vectorFile
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("published vectors must be valid JSON: %v", err)
+	}
+	return v
+}
+
+// TestPublishedManifestVectors recomputes every published manifest identifier
+// from the published inputs.
+func TestPublishedManifestVectors(t *testing.T) {
+	v := loadVectors(t)
+	if v.Protocol != mailkey.Version {
+		t.Fatalf("vectors are for %q, this is %q", v.Protocol, mailkey.Version)
+	}
+	in := v.Manifest.Input
+	pk, err := hex.DecodeString(in.PublicKeyHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.New(in.Domain, time.Unix(in.IssuedAt, 0), time.Unix(in.ExpiresAt, 0), in.Alg, in.Enc, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := manifest.Pack(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(raw); got != v.Manifest.CanonicalBytesHex {
+		t.Fatalf("canonical bytes differ from the published vector:\n got %s\nwant %s", got, v.Manifest.CanonicalBytesHex)
+	}
+	if len(raw) != v.Manifest.CanonicalBytesLen {
+		t.Fatalf("canonical length = %d, published %d", len(raw), v.Manifest.CanonicalBytesLen)
+	}
+	if got := manifest.EncodeID(manifest.ManifestIDOf(raw)); got != v.Manifest.ManifestID {
+		t.Fatalf("manifest_id = %s, published %s", got, v.Manifest.ManifestID)
+	}
+	if got := manifest.EncodeID(m.Key.Kid); got != v.Manifest.Kid {
+		t.Fatalf("kid = %s, published %s", got, v.Manifest.Kid)
+	}
+
+	// The derived names and the two advertisement forms are part of the vector:
+	// an implementation that agrees on the bytes but advertises them differently
+	// is still not interoperable.
+	name, err := discovery.DNSName(in.Domain)
+	if err != nil || name != v.Manifest.DNSOwnerName {
+		t.Fatalf("dns owner name = %q (%v), published %q", name, err, v.Manifest.DNSOwnerName)
+	}
+	if got := discovery.FormatDNS(manifest.ManifestIDOf(raw)); got != v.Manifest.DNSTxtValue {
+		t.Fatalf("dns txt = %q, published %q", got, v.Manifest.DNSTxtValue)
+	}
+	hdr, err := discovery.FormatHeader(in.Domain, manifest.ManifestIDOf(raw))
+	if err != nil || hdr != v.Manifest.MailKeyHeader {
+		t.Fatalf("header = %q (%v), published %q", hdr, err, v.Manifest.MailKeyHeader)
+	}
+	u, err := discovery.DiscoveryURL(in.Domain)
+	if err != nil || u.String() != v.Manifest.DiscoveryURL {
+		t.Fatalf("discovery url = %v (%v), published %q", u, err, v.Manifest.DiscoveryURL)
+	}
+	// The transport constants are part of the published contract too: an
+	// implementation that agrees on every byte but serves them at another path,
+	// or labels them a type a peer refuses, still does not interoperate.
+	if mailkey.MediaType != v.Manifest.MediaType {
+		t.Fatalf("media type = %q, published %q", mailkey.MediaType, v.Manifest.MediaType)
+	}
+	if mailkey.WellKnownPath != v.Manifest.WellKnownPath {
+		t.Fatalf("well-known path = %q, published %q", mailkey.WellKnownPath, v.Manifest.WellKnownPath)
+	}
+
+	// And the published bytes parse back as canonical for the published domain —
+	// the check a receiving implementation performs.
+	back, err := manifest.ParseCanonical(raw, in.Domain)
+	if err != nil {
+		t.Fatalf("published bytes must validate as canonical: %v", err)
+	}
+	if back.Key.Kid != m.Key.Kid {
+		t.Fatal("parsing the published bytes must recover the published kid")
+	}
+
+	// Timestamps are outside the kid preimage, so a manifest reissued with new
+	// validity names the SAME key. An implementation that folded timestamps into
+	// the kid would rotate the identifier on every republication.
+	later, err := manifest.New(in.Domain, time.Unix(in.IssuedAt+86400, 0), time.Unix(in.ExpiresAt+86400, 0), in.Alg, in.Enc, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.Key.Kid != m.Key.Kid {
+		t.Fatal("the kid must not depend on the manifest's timestamps")
+	}
+	if lraw, err := manifest.Pack(later); err != nil || manifest.ManifestIDOf(lraw) == manifest.ManifestIDOf(raw) {
+		t.Fatal("the manifest_id must change when any field changes")
+	}
+}
+
+/*
+TestPublishedEnvelopeVector opens the published envelope with the published
+private key.
+
+It is a DECRYPT vector rather than an encrypt vector, and that is forced by the
+construction: every envelope carries a fresh ephemeral key and nonce, so no
+implementation can reproduce another's bytes. What CAN be shared is the ability
+to open them, which is the property that actually matters for interoperability —
+and it transitively verifies the whole suite, since the header fields are
+authenticated as associated data and a wrong understanding of any of them makes
+the tag fail.
+*/
+func TestPublishedEnvelopeVector(t *testing.T) {
+	v := loadVectors(t)
+	if v.Envelope.Suite != envelope.SuiteX25519HKDFSHA256AES256GCM {
+		t.Fatalf("vector suite %q, this implementation %q", v.Envelope.Suite, envelope.SuiteX25519HKDFSHA256AES256GCM)
+	}
+	priv, err := hex.DecodeString(v.Envelope.RecipientPrivateHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := base64.StdEncoding.DecodeString(v.Envelope.WireBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := envelope.Unmarshal(wire)
+	if err != nil {
+		t.Fatalf("the published envelope must parse: %v", err)
+	}
+	// The envelope names its key and its fetch, and both are published.
+	if got := manifest.EncodeID(env.Header.Kid); got != v.Envelope.Kid {
+		t.Fatalf("envelope kid = %s, published %s", got, v.Envelope.Kid)
+	}
+	if got := manifest.EncodeID(env.Header.ManifestID); got != v.Envelope.ManifestID {
+		t.Fatalf("envelope manifest_id = %s, published %s", got, v.Envelope.ManifestID)
+	}
+	got, err := envelope.Open(priv, env)
+	if err != nil {
+		t.Fatalf("the published envelope must open with the published key: %v", err)
+	}
+	if string(got) != v.Envelope.Plaintext {
+		t.Fatalf("plaintext differs:\n got %q\nwant %q", got, v.Envelope.Plaintext)
+	}
+
+	// The published kid really names the published key pair — the receiver's key
+	// generation and a sender's calculation must agree (test plan §10).
+	pub, err := hex.DecodeString(v.Envelope.RecipientPublicHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mraw, err := hex.DecodeString(v.Envelope.ManifestBytesHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.ParseCanonical(mraw, "example.com")
+	if err != nil {
+		t.Fatalf("the published envelope's manifest must validate: %v", err)
+	}
+	kid, err := manifest.KeyIDOf(m.Domain, m.Key.Algorithm, m.Key.Encryption, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kid != env.Header.Kid {
+		t.Fatal("the sender's computed kid must equal the one the envelope names")
+	}
+
+	// Tampering with any authenticated field fails, and the vector proves it on
+	// PUBLISHED bytes rather than freshly generated ones.
+	for name, mutate := range map[string]func(*envelope.Envelope){
+		"domain":      func(e *envelope.Envelope) { e.Header.Domain = "attacker.test" },
+		"kid":         func(e *envelope.Envelope) { e.Header.Kid[0] ^= 1 },
+		"manifest id": func(e *envelope.Envelope) { e.Header.ManifestID[0] ^= 1 },
+		"suite":       func(e *envelope.Envelope) { e.Header.Suite = "other-suite" },
+		"ciphertext":  func(e *envelope.Envelope) { e.Ciphertext[0] ^= 1 },
+	} {
+		bad, err := envelope.Unmarshal(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(bad)
+		if _, err := envelope.Open(priv, bad); err == nil {
+			t.Errorf("tampering with the %s must fail authentication", name)
+		}
+	}
+}

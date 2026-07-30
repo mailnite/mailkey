@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +234,32 @@ func TestNoPublisherIsNotACrash(t *testing.T) {
 	h := &wellknown.Handler{}
 	if w := get(h, http.MethodGet, "mail.example.com", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("status %d", w.Code)
+	}
+}
+
+/*
+TestMediaTypeIsGenericMessagePack pins the content type, because it is a wire
+contract and not a label: a peer that refuses the type never reaches the bytes.
+
+The generic type is deliberate. A manifest IS canonical MessagePack, nothing
+about reading one depends on knowing who wrote the schema, and a vendor tree
+would both imply the format belongs to one implementation and make ordinary
+tooling treat the response as exotic.
+*/
+func TestMediaTypeIsGenericMessagePack(t *testing.T) {
+	if mailkey.MediaType != "application/msgpack" {
+		t.Fatalf("media type = %q; changing it is a protocol change", mailkey.MediaType)
+	}
+	h, _ := newFixture(t, "example.com")
+	w := get(h, http.MethodGet, "mail.example.com", nil)
+	if got := w.Header().Get("Content-Type"); got != "application/msgpack" {
+		t.Fatalf("served content type = %q", got)
+	}
+	// Not a vendor tree, and not a type that invites sniffing.
+	if strings.Contains(w.Header().Get("Content-Type"), "vnd.") {
+		t.Fatal("the discovery response must not use a vendor media type")
+	}
+	if w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("a binary response must be served nosniff")
 	}
 }

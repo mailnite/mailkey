@@ -89,8 +89,12 @@ The client MUST:
 Recommended media type:
 
 ```text
-application/vnd.mailnite.mail-key+msgpack
+application/msgpack
 ```
+
+A client SHOULD accept any MessagePack spelling (and an empty or
+`application/octet-stream` type), because the media type is a hint: what decides
+whether a response is a manifest is the canonical parse.
 
 The server SHOULD return:
 

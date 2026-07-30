@@ -76,8 +76,14 @@ const HostPrefix = "mail"
 // WellKnownPath is the fixed path of the discovery endpoint.
 const WellKnownPath = "/.well-known/mail-key"
 
-// MediaType is the recommended content type of the discovery response.
-const MediaType = "application/vnd.mailnite.mail-key+msgpack"
+// MediaType is the content type of the discovery response.
+//
+// The generic MessagePack type rather than a vendor-specific one: a manifest IS
+// canonical MessagePack, and nothing about reading it depends on knowing who
+// specified the schema. A vendor tree would also imply the format belongs to one
+// implementation, which is the opposite of the point — and it makes ordinary
+// tooling (proxies, caches, curl) treat the response as something exotic.
+const MediaType = "application/msgpack"
 
 // MaxBodyBytes bounds a discovery response before it is allocated.
 const MaxBodyBytes = 16 << 10

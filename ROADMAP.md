@@ -320,17 +320,54 @@ Discovery stays at accept time rather than delivery time, and that is now stated
 where it is enforced: the queue seals and THEN DKIM-signs, so sealing later would
 invalidate a signature already computed over the stored bytes.
 
-## Phase 9 — interoperability gate
+## Phase 9 — interoperability gate ✅
 
-The release checklist of `06-TEST-PLAN.md`: two independent processes producing
-identical bytes and identifiers, envelope vectors published, rotation and
-delayed-delivery tests, header-storm and SSRF tests, fuzzing of every parser.
+The release checklist of `06-TEST-PLAN.md` §10, written up in `INTEROP.md`.
 
-Plus the public documentation, which currently describes a protocol this software
-no longer runs: the marketing site's DNS page and mathematics page still present
-`_mailpubkey` as the key source and the `Mailnite-Key` header as a key a receiver
-pins (≈50 strings across 8 languages, `mailnite-web-ui/src/i18n/pages/dns.js` and
-`math.js`). An operator following it today would publish a record nothing reads.
-It is scheduled here rather than with the code because the Peers and Domains UI
-of phase 8 changes the same copy again, and shipping is the point at which it
-must be true.
+**Published vectors.** `testdata/vectors.json` is the artifact a third-party
+implementation is checked against: the manifest inputs, the canonical bytes, both
+identifiers, both advertisement forms, the transport constants, and an envelope
+decrypt vector (private key, wire bytes, expected plaintext). It states its own
+inputs, so nothing has to be taken on trust — and `TestPublishedManifestVectors`
+/ `TestPublishedEnvelopeVector` recompute every value on each run, because
+published vectors that drift from the code are worse than none.
+
+The envelope vector is a DECRYPT vector by necessity: every envelope carries a
+fresh ephemeral key and nonce, so no implementation can reproduce another's
+bytes. Being able to OPEN them is the property that matters, and it transitively
+checks the suite — the header fields are authenticated as associated data.
+
+**Two independent implementations.** `mailnite/e2e/mkdp1-independent.mjs` is a
+hand-written, dependency-free JavaScript implementation of the canonical
+MessagePack codec and both identifiers, written from the protocol description and
+sharing no code with the server. Reaching for a MessagePack library would have
+tested that library's agreement with Go's, not the protocol's clarity. It runs in
+the e2e ladder against a live authority — on a runtime-generated key, and again
+after a rotation — and must agree on the bytes, the manifest id and the `kid`.
+
+**Fuzzing** covers all seven parsers the plan lists (the two that were missing,
+`FuzzParseDNS` and the envelope's `FuzzUnmarshal`, were added here), plus
+`TestDecodeBombIsBounded` for the "bounded memory and CPU" property — tiny inputs
+claiming four-billion-entry maps.
+
+That fuzzing found **F-16** immediately: the envelope parser accepted
+non-canonical encodings, so two byte strings decoded to one envelope while the
+AAD — computed from the parsed fields — authenticated both. It now repacks and
+requires byte-identical input, exactly as the manifest parser always has.
+
+**Gaps closed** that the plan named and nothing covered: one domain is one Peer
+across all three observation sources (§6), delivery retries never perform
+discovery (§7 — structural, since the queue seals then signs), and inbound
+delivery is never blocked by discovery (§8, including a broken observation
+backend and malformed headers).
+
+**The public documentation** described a protocol this software no longer runs.
+The Directory page was rewritten in all 8 languages — the record now carries a
+manifest id and is optional, the authority is HTTPS, the three-field grammar
+replaces six, rotation has no sequence number and the section says why the old
+ordering rule was the bug, and the threat model improved rather than shrank (a
+forged record can now only cause a fetch). The interactive composer builds a
+`_mailkey` record and states plainly that a real id cannot be composed by hand.
+The mathematics page, the home page's send path and the deploy page's zone file
+followed.
+

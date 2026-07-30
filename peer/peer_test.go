@@ -11,6 +11,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -658,4 +659,72 @@ func stringsContains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+/*
+TestOneDomainIsOnePeer is the Peer identity rule of the test plan (§6): DNS
+creates one discovered Peer, a header for the same domain attaches to THAT Peer,
+and a manual add does not create a duplicate.
+
+It matters because the three sources arrive independently and asynchronously. If
+any of them could mint its own record, a domain would end up with several
+disagreeing views of its key and the "which one is effective" question — the
+question MKDP1 exists to have exactly one answer to — would come back.
+*/
+func TestOneDomainIsOnePeer(t *testing.T) {
+	st := peer.NewMemStore(nil)
+	r := &fakeResolver{err: mailkey.Failf(mailkey.FailureNetwork, "x", "offline")}
+	svc := peer.NewService(r, st, peer.Options{Workers: 1, QueueSize: 8})
+	defer svc.Close()
+	ctx := context.Background()
+
+	id := manifest.EncodeID(manifest.ManifestIDOf([]byte("some manifest")))
+
+	// DNS first.
+	if err := svc.ObserveDNS(ctx, domain, []string{"v=MKDP1; id=" + id + "; mode=https"}); err != nil {
+		t.Fatal(err)
+	}
+	// Then a header for the same domain, then a manual add.
+	if err := svc.ObserveHeader(ctx, "v=MKDP1; d="+domain+"; id="+id+"; mode=https", "inbound"); err != nil {
+		t.Fatal(err)
+	}
+	// A manual add against an offline authority REPORTS the failure — that is
+	// what the admin surface shows — but the peer record is written first, so the
+	// domain is tracked either way. The error is the point of the scenario, not a
+	// problem with it.
+	if _, err := svc.AddPeer(ctx, domain); err == nil {
+		t.Fatal("adding a peer whose authority is offline must report the failure")
+	}
+	// The same domain spelled differently: a peer is identified by its NORMALIZED
+	// domain, so this must not mint a second record.
+	if _, err := svc.AddPeer(ctx, strings.ToUpper(domain)+"."); err == nil {
+		t.Fatal("expected the same offline failure")
+	}
+
+	peers, err := st.ListPeers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 {
+		names := make([]string, 0, len(peers))
+		for _, p := range peers {
+			names = append(names, p.Domain)
+		}
+		t.Fatalf("three sources produced %d peers (%v), want 1", len(peers), names)
+	}
+	p := peers[0]
+	if p.Domain != domain {
+		t.Fatalf("peer domain %q", p.Domain)
+	}
+	// Every source is attached to that one peer, and each appears once —
+	// observations coalesce per source, so a mail flood cannot grow the record.
+	seen := map[mailkey.Source]int{}
+	for _, o := range p.Observations {
+		seen[o.Source]++
+	}
+	for _, want := range []mailkey.Source{mailkey.SourceDNS, mailkey.SourceHeader, mailkey.SourceManual} {
+		if seen[want] != 1 {
+			t.Errorf("source %q appears %d times, want exactly 1", want, seen[want])
+		}
+	}
 }
