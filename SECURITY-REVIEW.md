@@ -243,6 +243,7 @@ reason the retention floor must not become an unbounded archive.
 | F-11 | Medium | Domain normalization was not idempotent (a Punycode A-label whose decoded form is invalid normalized once, then failed on its own output) | `Normalize` verifies stability and rejects; found by fuzzing |
 | F-12 | Medium | Base64url identifiers had multiple valid spellings (unused trailing bits ignored), so one id could be advertised under different-looking strings | `DecodeID` requires the canonical spelling; found by fuzzing |
 | F-13 | Medium | At-rest private-key wrapping (`mailcore/service`) also used nil AAD, so a wrapped blob was anonymous ciphertext: it could be moved between records or generations and would still unwrap | `wrap`/`unwrap` bind (owner, seq) as associated data; clean break, no unbound fallback |
+| F-14 | Medium | The blob store (`mailnite/pkg/blob`) used nil AAD, and chunk/object files are plain files OUTSIDE the encrypted key-value store — so a writer without the key could splice one sealed entry over another's location and the read would return the wrong message's content | Entries bind their location (`chunk\|<id>\|<offset>`, `object\|<id>`); the seal moved inside the write lock so the location is known first |
 
 ---
 
@@ -267,7 +268,8 @@ interoperability failure rather than an obvious break.
   manifest under a different-looking id and trigger pointless refreshes. The
   decoder now requires the input to re-encode to itself.
 
-**F-13 was found by auditing F-1's fix rather than by reasoning about the spec.**
+**F-13 and F-14 were found by auditing F-1's fix rather than by reasoning about
+the spec.**
 Having bound the envelope's metadata, the obvious question was where else this
 codebase encrypts something whose *name* lives outside the ciphertext — and the
 at-rest key wrapping did exactly that. A wrapped private key was anonymous
@@ -280,6 +282,16 @@ the audit trail says something false about which key was used. `wrap`/`unwrap`
 now bind (owner, generation), with no unbound fallback: this is an at-rest
 format only we produce, so unlike the wire envelope there is no second party to
 stay compatible with.
+
+The same question asked once more found F-14 in the blob store. Chunk and object
+files are ordinary files on disk — *outside* the encrypted key-value store —
+which is what makes them the interesting case: a writer who does not hold the
+data key can copy one sealed entry over another's offset, and the read succeeds
+and hands back the wrong message's body. They cannot forge the reference that
+points at it, because references live in the sealed store, so the location is
+precisely the handle they have. Entries now bind their location. (One nil-AAD
+site was left alone deliberately: Web Push encryption is RFC 8291, which defines
+the associated data as empty — binding anything there would break the standard.)
 
 The property that caught F-11 and F-12 is the same one the protocol depends on:
 *anything accepted must round-trip to exactly what was accepted*. That invariant is now

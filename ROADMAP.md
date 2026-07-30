@@ -107,15 +107,51 @@ remote attacker can trigger. Everything in the security review §3.4 lands here:
   interfaces, including the disabled switch, the missing-store fallback, the
   restart/destroy lifecycle and property plumbing.
 
-## Phase 5 — mailcore changes
+## Phase 5 — mailcore changes ✅ (mailnite wiring included)
 
-- Retire the `seq`-ordered `_mailpubkey` resolver chain and the `Mailnite-Key`
-  key-installing path (security review F-2) — a clean break, no dual behavior:
-  keeping the old ordering alongside MKDP1 would reopen the frozen-rotation bug.
-- `api.KeyResolver` reshaped around `kid`: the queue asks for a *manifest
-  result*, not a bare public key, so the envelope's identifiers cannot drift
-  from the discovery that authorized them.
-- Keep the legacy envelope decode-only for mail already in flight.
+Done in mailcore:
+
+- `api.KeyResolver` reshaped: `ResolveKey(ctx, address) (mailkey.Result, bool,
+  error)`. The queue asks for a validated *manifest result*, not a bare public
+  key, so the envelope's identifiers cannot drift from the discovery that
+  authorized them. mailcore now imports mailkey — the alternative was a second
+  copy of the envelope construction, which is the drift bug twice over.
+- `crypto/mkdp.go`: `SealMKDP1` / `OpenMKDP1` / `IsMKDP1` wrap a mailkey
+  envelope in the same outer message shape. The legacy `Seal`/`Open` stay
+  DECRYPT-ONLY for mail already in a queue or mailbox; the `X-Mailnite-Alg`
+  header says which format a message carries, so the parser is chosen from the
+  message rather than guessed.
+- The `seq`-ordered resolver chain is DELETED (`crypto/resolver.go`: DNSResolver,
+  ChainResolver, StaticResolver and the per-domain seq high-water). Security
+  review F-2 — leaving the old ordering beside MKDP1 would reopen the
+  frozen-rotation bug.
+- Per-domain keys are now visible in the tests: a second mailbox at a published
+  domain is covered by the same manifest (the old test asserted the opposite,
+  because the retired scheme published per user).
+
+Done in mailnite (the wiring the mailcore change requires):
+
+- `pkg/server/mailkey_store.go` — the durable `mailkey.Store` (region
+  `"mailkey"`), persistence only: every transition comes from `mailkey/peer`'s
+  pure functions, so it cannot drift from the library's reference store.
+  Atomicity is a per-domain lock plus a single-key write.
+- `pkg/server/mailkey_component.go` — resolver, store and service built ONCE and
+  shared by the queue and the admin surface (two builders would mean two caches
+  disagreeing about the same domains). Re-entrant across the in-place restart.
+- `KeyResolverFactory` now returns the MKDP1 adapter; "outbound encryption off"
+  is a resolver that finds nothing.
+- The `Mailnite-Key` key-installing path is DELETED (`pubkey_header.go`,
+  `learnPeerKey`, the stamping call) — F-2's other half. MKDP1's `Mail-Key`
+  header carries a manifest id, which needs the publisher (phase 6).
+- The pin book is DELETED (`peer_pins.go`: seq-monotonic `LearnPin`, the conflict
+  ledger, `PinEntry`/`ConflictEntry`). `admin.peers.*` is now
+  `list/add/refresh/forget/policy` over the peer book — Add takes a DOMAIN and
+  nothing else.
+- The Peers page and its i18n (×8) follow: no key field, no sequence number, no
+  conflict card. The `peers.conflict` alert is replaced by `peers.unstable`
+  (authority instability), emitted from the one place that can detect it.
+- `mailnite key lookup` now probes MKDP1 and prints the manifest id, kid and
+  validity.
 
 ## Phase 6 — Mailnite receiver and publisher
 
