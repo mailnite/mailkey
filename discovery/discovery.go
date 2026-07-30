@@ -142,6 +142,71 @@ func AuthorityHost(domain string) (string, error) {
 	return mailkey.HostPrefix + "." + d, nil
 }
 
+/*
+DomainCandidatesOf is the server side of discovery: which domain's manifest a
+request addressed to this host is asking for. It is the inverse of AuthorityHost,
+and it exists in the library because getting it wrong is a host-header bug — an
+implementation that trims the "mail." prefix by string surgery skips
+normalization and can be fed a port, an uppercase label, a trailing dot, or an
+IP literal.
+
+It returns candidates in order of authority, most specific first, because one
+host can legitimately mean two domains:
+
+	mail.example.com  →  example.com        (the authority for example.com)
+	                  →  mail.example.com   (a domain literally named that)
+
+MKDP1 defines the first reading, so it is tried first; the second exists because
+a domain named "mail.example.com" is a real thing an operator may host, and
+because a server whose webmail and authority share one address also sees requests
+whose Host is the bare domain. The caller decides between candidates by asking
+which one it actually hosts — never by trusting the host header — so the order
+matters only when a server hosts BOTH readings, and then the protocol's own
+meaning wins.
+
+A host that cannot be a domain at all (an IP, a port that is not 443, an empty
+label) yields no candidates, so the caller has nothing to answer for.
+*/
+func DomainCandidatesOf(host string) []string {
+	h := strings.TrimSpace(host)
+	if h == "" {
+		return nil
+	}
+	// A Host header may carry a port. Only the default port is acceptable: a
+	// request that arrived on some other port did not reach the authority MKDP1
+	// describes, and answering it would paper over the misconfiguration.
+	if hostOnly, port, err := net.SplitHostPort(h); err == nil {
+		if port != "443" {
+			return nil
+		}
+		h = hostOnly
+	}
+	// Normalize rejects IPs, wildcards, single labels and ports, and pins the
+	// result to its own stable normal form.
+	full, err := Normalize(h)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	if rest, ok := cutPrefixLabel(full, mailkey.HostPrefix); ok {
+		if d, err := Normalize(rest); err == nil {
+			out = append(out, d)
+		}
+	}
+	return append(out, full)
+}
+
+// cutPrefixLabel removes a leading DNS label, and only a whole label:
+// "mail.example.com" gives "example.com", while "mailx.example.com" gives
+// nothing.
+func cutPrefixLabel(host, label string) (string, bool) {
+	p := label + "."
+	if !strings.HasPrefix(host, p) || len(host) == len(p) {
+		return "", false
+	}
+	return host[len(p):], true
+}
+
 // DiscoveryURL derives the complete authority URL. It takes a domain and
 // nothing else: there is no code path in MKDP1 that accepts a caller-supplied
 // URL, host or port.

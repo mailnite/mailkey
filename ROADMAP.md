@@ -193,22 +193,99 @@ Remaining from this phase, moved to phase 7 where they belong: the `_mailkey`
 DNS record and the `Mail-Key` header both advertise the published manifest id,
 so they land with the endpoint that serves it.
 
-## Phase 7 — the public 443 endpoint
+## Phase 7 — the public 443 endpoint ✅
 
-A dedicated well-known server, modelled on Mailnite's challenge-only ACME
-server on :80 (`pkg/server/acme_server.go`), because the port-sharing problem
-is identical:
+A dedicated well-known server, modelled on Mailnite's challenge-only ACME server
+on :80 (`pkg/server/acme_server.go`), because the port-sharing problem is
+identical. `mailKeyVia` decides once, the same shape as `acmeChallengeVia`, so
+the relay port set, the status table and the server cannot disagree:
 
-- `mail.{domain}` must answer on public **443** independently of the local or
-  Kubernetes webmail port (8443).
-- When webmail's HTTPS server owns 443, mount the handler on its mux.
-- When mail rides the relay and webmail does not, take a **dedicated relay
-  listener on public 443 that serves only `/.well-known/mail-key`** and 404s
-  everything else — never webmail, never the admin console (F-5).
-- Static prebuilt bytes, `ETag` from the manifest id, `Cache-Control` bounded by
-  `expires_at`.
+- **any local webmail port is bound** → `web.MailKeyWellKnown` is an ordinary
+  handler bean, so servion serves it on every web server in the scope: the HTTP
+  mux, the HTTPS mux and the loopback console alike. Sharing 443 needs no code.
+- **none is** (the web pair rides the relay while mail does not, or both webmail
+  servers are off) → `server.MailKeyServer` takes a dedicated listener on public
+  443 and serves `/.well-known/mail-key` only, 404 for everything else (F-5),
+  terminating TLS under the mail server's own certificate.
+- **mail rides the relay** → the authority is on the VDS, so a local port is no
+  help: either webmail's relayed HTTPS server carries the endpoint, or the
+  dedicated server takes the relay's public 443.
+- The claimants are mutually exclusive by construction, and tests assert both
+  that the relay set never contains two of them and that a dedicated listener is
+  never chosen while a local webmail port is bound.
 
-## Phase 8 — Peers UI and outbound policy
+**Being on both local ports is the point, not a side effect.** Which one fronts
+public 443 is the operator's routing decision and the process cannot see it: a
+datacenter host maps 443 → 8443 and it stays TLS, while a Kubernetes ingress
+TERMINATES TLS and maps 443 → the pod's **8080** in plaintext, leaving 8443
+possibly serving nothing. So `mailKeyVia` asks only whether ANY webmail server
+binds locally, and TLS is required only for a listener we terminate ourselves —
+an earlier version gated the whole decision on `tls.enabled`, which reported "no
+endpoint" for exactly the pod deployment where the mux was in fact answering.
+Inside Kubernetes `webmailHTTPEnabled` is unconditionally true, so a pod always
+shares the mux and never binds a port nothing routes to. The status row names
+every answering port instead of calling one of them "the" 443.
+
+`mailkey/wellknown` holds the handler, so any MKDP1 server gets the caching and
+method rules right: `ETag` = the manifest id (a strong validator that cannot lie,
+since the id is the hash of the bytes), `max-age` = min(remaining validity, 1
+hour), conditional requests, `no-store` on a miss, `GET`/`HEAD` only.
+`discovery.DomainCandidatesOf` maps a Host header back to a domain — the inverse
+of `AuthorityHost`, in the library because doing it by string surgery is how
+host-header bugs happen.
+
+Also landed here, since both advertise the id this endpoint serves:
+
+- the `_mailkey.<domain>` TXT record replaces `_mailpubkey` in the operator
+  checklist, and `mailcore/crypto/dns.go` is deleted;
+- the `Mail-Key` header replaces `Mailnite-Key` on outbound mail (and in DKIM's
+  signed set), carrying a manifest id and no key;
+- inbound `Mail-Key` headers become observations on mail that survives filing.
+
+Two defects fixed on the way, neither visible to unit tests:
+
+- **publication lagged rotation.** `Invalidate` had no callers, so a rotated key
+  would not be published until the old manifest neared expiry — days of
+  advertising the key the operator had just replaced. `CurrentManifest` now
+  re-derives the current key's `kid` per request and rebuilds when it differs, so
+  correctness no longer depends on anyone remembering to invalidate.
+- **onboarding never minted the primary domain's encryption key.** It was created
+  only by `AddLocalDomain` or a primary-domain change, so a fresh install
+  published nothing — and told every correspondent to send cleartext — until an
+  administrator happened to open the DNS page. `Bootstrap` now mints it, as
+  adding a domain always did.
+
+## Phase 8 — key lifecycle UI, Peers UI and outbound policy
+
+### Our own keys: a per-domain section on Administration → Domains
+
+The receiving half now has a lifecycle an operator can no longer see: a key is
+issued, published for a bounded validity, replaced by a rotation, retained while
+delayed mail may still name it, then pruned. Phases 5–6 put all of that under
+the floor — `retentionFloor()`, `pruneRetired`, `Invalidate` — with no surface
+that shows or drives it. Each hosted domain gets:
+
+- **State**: whether the domain has a key at all, its `kid`, the published
+  manifest id, when it was issued and when it expires. A hosted domain with no
+  key publishes nothing and receives everything in cleartext — today that is
+  invisible, which is the worst way for it to be true.
+- **Issue** for a domain that has no key yet (added after onboarding, so it never
+  passed through the wizard's key step).
+- **Rotate**, stating the consequence plainly: senders keep using the previous
+  key until their cached manifest expires, so both generations must stay
+  openable — which is what the retention floor guarantees.
+- **Retired generations**: how many, each one's retirement date and the date it
+  becomes prunable, so "why is this key still here" has an answer on screen.
+- **Retention**: the floor (manifest lifetime + delivery window + margin) shown
+  as the derived number it is, with the operator's own longer value editable and
+  a shorter one refused, matching the code.
+
+Deliberately **not** part of onboarding: the wizard issues the primary domain's
+key and moves on. This section is for the second domain, the rotation a year
+later, and the "what is actually published for us" question — day-two work, not
+first-run work.
+
+### Peers
 
 - The Administration → Peers page reshaped to the Peer model: state, effective
   manifest id, `kid`, expiry, last verification, observed sources, policy, last
@@ -225,3 +302,12 @@ is identical:
 The release checklist of `06-TEST-PLAN.md`: two independent processes producing
 identical bytes and identifiers, envelope vectors published, rotation and
 delayed-delivery tests, header-storm and SSRF tests, fuzzing of every parser.
+
+Plus the public documentation, which currently describes a protocol this software
+no longer runs: the marketing site's DNS page and mathematics page still present
+`_mailpubkey` as the key source and the `Mailnite-Key` header as a key a receiver
+pins (≈50 strings across 8 languages, `mailnite-web-ui/src/i18n/pages/dns.js` and
+`math.js`). An operator following it today would publish a record nothing reads.
+It is scheduled here rather than with the code because the Peers and Domains UI
+of phase 8 changes the same copy again, and shipping is the point at which it
+must be true.

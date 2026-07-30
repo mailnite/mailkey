@@ -57,6 +57,7 @@ order.
 | `mailkey/envelope` | the sealed message, with every identifier bound as AEAD associated data |
 | `mailkey/resolver` | the hardened HTTPS authority client — the only code that installs a key |
 | `mailkey/peer` | Peer state, observation reconciliation, the in-memory store and the service |
+| `mailkey/wellknown` | the publishing endpoint: an `http.Handler` over a `Publisher`, with the caching, validator and method rules the protocol needs |
 | `mailkey/component` | optional glue beans, for dependency-injection applications |
 
 The root package is interfaces only — `Resolver`, `Store`, `Service`,

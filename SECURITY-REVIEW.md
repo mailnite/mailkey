@@ -244,6 +244,32 @@ reason the retention floor must not become an unbounded archive.
 | F-12 | Medium | Base64url identifiers had multiple valid spellings (unused trailing bits ignored), so one id could be advertised under different-looking strings | `DecodeID` requires the canonical spelling; found by fuzzing |
 | F-13 | Medium | At-rest private-key wrapping (`mailcore/service`) also used nil AAD, so a wrapped blob was anonymous ciphertext: it could be moved between records or generations and would still unwrap | `wrap`/`unwrap` bind (owner, seq) as associated data; clean break, no unbound fallback |
 | F-14 | Medium | The blob store (`mailnite/pkg/blob`) used nil AAD, and chunk/object files are plain files OUTSIDE the encrypted key-value store — so a writer without the key could splice one sealed entry over another's location and the read would return the wrong message's content | Entries bind their location (`chunk\|<id>\|<offset>`, `object\|<id>`); the seal moved inside the write lock so the location is known first |
+| F-15 | Medium | DKIM signing keys (`mailcore/queue`) are sealed under one host wrap key with a CONSTANT as associated data, while key files are per-domain (`<domain>.key`) — so a sealed file could be copied into another domain's slot and would open there. The server would then sign that domain's mail with the wrong key, and every signature would fail against the DKIM record the domain publishes: silent, total deliverability loss that looks like a DNS problem. Found by the exhaustive AEAD sweep below, not by the MKDP1 work | Sealed files bind their domain (`MAILNITE-SEALED-KEY.v2\|<domain>`); v1 files are refused with an actionable message rather than opened, since their bytes carry no domain at all |
+
+### 4b. The exhaustive AEAD sweep
+
+Every AEAD construction in the three repositories, audited for the two failure
+modes that matter: unbound ciphertext (a blob that opens somewhere it does not
+belong) and nonce reuse (catastrophic for GCM). Eight sites:
+
+| Site | Associated data | Nonce | Verdict |
+| --- | --- | --- | --- |
+| `mailkey/envelope` | every header field (suite, domain, kid, manifest id, alg, enc, ephemeral key) | random per message, under a per-message key from a fresh ephemeral ECDH | correct |
+| `mailcore/crypto` (legacy envelope v2) | version, alg, key space, generation, ephemeral key | as above | correct |
+| `mailcore/service` at-rest key wrap | `(type, owner, seq)` | random, few wraps per long-lived key | correct (F-13) |
+| `mailcore/queue` DKIM key seal | **constant** → now `(header, domain)` | random | **F-15**, fixed |
+| `mailnite/pkg/keeper` sealed keys | the file's own name | random | correct — one file, so the name IS its location |
+| `mailnite/pkg/blob` chunk entries | `chunk\|<id>\|<offset>` | random per entry; 96-bit birthday bound at ~2^48 entries, far beyond mail volumes | correct (F-14) |
+| `mailnite/pkg/blob` objects | `object\|<id>` | as above | correct (F-14) |
+| `mailnite/pkg/web` Web Push | empty, per RFC 8291 | HKDF-derived from a per-message random salt | correct by specification |
+
+The pattern behind F-1, F-13, F-14 and F-15 is one mistake with four faces:
+**ciphertext that does not say where it belongs.** Encryption alone makes a blob
+unreadable; it does not make it non-interchangeable. Wherever several blobs are
+sealed under the same key and stored in addressable slots — generations of a key,
+chunks of a message, one key file per domain — the slot has to be inside the
+authenticated data, or an attacker who can move bytes without reading them can
+still change what the system believes.
 
 ---
 

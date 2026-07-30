@@ -202,3 +202,37 @@ func TestParseDNS(t *testing.T) {
 		t.Fatal("a contradicting d= must be skipped")
 	}
 }
+
+// TestDomainCandidatesOf pins the server-side host→domain mapping. It decides
+// which domain a request is answered for, so everything it must refuse is a way
+// of asking a server to speak for a name it was not addressed by.
+func TestDomainCandidatesOf(t *testing.T) {
+	// The authority reading comes first, the literal host second.
+	got := discovery.DomainCandidatesOf("mail.example.com")
+	if len(got) != 2 || got[0] != "example.com" || got[1] != "mail.example.com" {
+		t.Fatalf("mail.example.com: %v", got)
+	}
+	// A bare hosted domain is only ever itself.
+	if got := discovery.DomainCandidatesOf("example.com"); len(got) != 1 || got[0] != "example.com" {
+		t.Fatalf("example.com: %v", got)
+	}
+	// Case, trailing dot and the default port are all normalized away, so the
+	// same request cannot be made to look like a different one.
+	for _, in := range []string{"MAIL.Example.COM", "mail.example.com.", "mail.example.com:443", " mail.example.com "} {
+		got := discovery.DomainCandidatesOf(in)
+		if len(got) != 2 || got[0] != "example.com" {
+			t.Errorf("%q: %v", in, got)
+		}
+	}
+	// Only a WHOLE label is the authority prefix.
+	if got := discovery.DomainCandidatesOf("mailx.example.com"); len(got) != 1 || got[0] != "mailx.example.com" {
+		t.Fatalf("mailx.example.com: %v", got)
+	}
+	// Nothing to answer for: not a domain, or not the port the authority lives on.
+	for _, in := range []string{"", "mail.", "localhost", "127.0.0.1", "[::1]", "192.0.2.1:443",
+		"mail.example.com:8443", "*.example.com", "https://mail.example.com"} {
+		if got := discovery.DomainCandidatesOf(in); len(got) != 0 {
+			t.Errorf("%q must yield no candidates, got %v", in, got)
+		}
+	}
+}
