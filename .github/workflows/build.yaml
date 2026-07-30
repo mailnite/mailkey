@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Private modules (mailcore, mailrelay) + the go.arpabet.com vanity host are
+  # fetched directly over git, bypassing the public proxy. See build.yaml.
+  GOPRIVATE: go.arpabet.com/*,github.com/mailnite/*
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # The protocol packages must not depend on glue or zap — the reason a host
+      # application with a different container (or none) can adopt MKDP1.
+      - name: Dependency contract
+        run: make check
+
+      - name: Format
+        run: make fmt
+
+      - name: Vet
+        run: make vet
+
+      - name: Build
+        run: make build
+
+      # Race detector included: the peer service runs background workers and the
+      # resolver coalesces concurrent lookups.
+      - name: Test
+        run: make test
+
+      # go.mod/go.sum must be tidy and the module graph intact — a stale
+      # requirement builds here and fails for whoever clones the repo alone.
+      - name: Module hygiene
+        run: make verify
+
+  # Fuzzing runs on main only. It has found four real defects in this
+  # repository — including one in the envelope parser that every hand-written
+  # test missed — so it earns build time; keeping it off pull requests keeps
+  # those fast, and a regression is caught on the merge commit either way.
+  fuzz:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Fuzz every parser
+        run: make fuzz FUZZTIME=45s
+      # A crasher is written into testdata/fuzz/; keep it, because the input
+      # that found the bug is the regression test.
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore

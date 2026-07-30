@@ -183,7 +183,6 @@ func TestReconciliationNoWinnerSelection(t *testing.T) {
 
 	// An observation that MATCHES the effective manifest is confirmed, and
 	// confirms without a refresh.
-	before := r.calls.Load()
 	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(resD.ManifestID)}); err != nil {
 		t.Fatal(err)
 	}
@@ -193,8 +192,47 @@ func TestReconciliationNoWinnerSelection(t *testing.T) {
 			t.Fatalf("a matching DNS id must be confirmed, got %q", o.Status)
 		}
 	}
-	if r.calls.Load() != before {
-		t.Fatal("a matching observation must not trigger a resolution")
+	// Whether this observation ALSO scheduled a refresh is not asserted here,
+	// and deliberately: the header observation above still holds a contradicting
+	// id, so the peer genuinely is behind and scheduling is correct. The
+	// "matching observation costs no fetch" property needs a peer nothing
+	// contradicts — see TestMatchingObservationCostsNoFetch.
+}
+
+/*
+TestMatchingObservationCostsNoFetch is the common case for every inbound message
+from a peer we already know: the advertised id matches what we hold, so it is
+confirmed from memory and no network happens at all.
+
+The drain matters. Scheduling is asynchronous, so "the counter did not move" is
+only meaningful once the workers have been given the chance and finished —
+Close() waits for them, and is idempotent, so the cleanup's Close is a no-op.
+Without it this reads as a pass whenever the worker is merely slow, which is
+exactly how a timing-dependent assertion hides a real regression.
+*/
+func TestMatchingObservationCostsNoFetch(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	svc, r, _ := newSvc(t, &clock)
+	ctx := context.Background()
+
+	res := makeResult(t, domain, clock, 24*time.Hour)
+	r.set(res, nil)
+	if _, err := svc.Refresh(ctx, domain); err != nil {
+		t.Fatal(err)
+	}
+	before := r.calls.Load() // the one synchronous fetch above
+
+	// Both sources report exactly the id we already hold.
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(res.ManifestID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ObserveHeader(ctx, "v=MKDP1; d="+domain+"; id="+manifest.EncodeID(res.ManifestID), "msg"); err != nil {
+		t.Fatal(err)
+	}
+	svc.Close() // drain: any scheduled resolution has now run
+
+	if got := r.calls.Load(); got != before {
+		t.Fatalf("a matching observation triggered %d resolution(s); it must cost no network", got-before)
 	}
 }
 
