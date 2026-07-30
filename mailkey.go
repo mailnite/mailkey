@@ -1,0 +1,309 @@
+/*
+ *
+ * Copyright 2022-present Karagatan LLC. All rights reserved.
+ *
+ */
+
+/*
+Package mailkey is the reference implementation of the Mail Key Discovery
+Protocol version 1 (MKDP1): how a sending mail server learns the CURRENT
+public envelope-encryption key of a recipient email domain, before the message
+is persisted in the outbound queue.
+
+MKDP1 in three sentences. One email domain has one Peer record; a Peer's
+effective key lives in an immutable, cached Manifest. The only authority that
+can install a manifest is an authenticated HTTPS GET of a deterministic URL —
+https://mail.<domain>/.well-known/mail-key — validated against the public web
+PKI. DNS records and the Mail-Key mail header are OBSERVATIONS: they say "this
+domain speaks MKDP1, and the manifest I saw had this id", they never carry a
+key, and they can never install one.
+
+What the protocol deliberately does not have: sequence numbers, key ordering,
+"newest wins", transparency logs, witnesses, or SMTP-time discovery. An
+ordering value suppliable by an unauthenticated observer is an attack surface
+(a forged maximum freezes rotation forever) — MKDP1 has no such value. See
+SECURITY-REVIEW.md.
+
+This root package declares the types and interfaces the protocol is expressed
+in; the subpackages implement them:
+
+	manifest   the wire schema, canonical serialization, ManifestID and KeyID
+	discovery  DNS/header advertisement parsing, domain normalization, URL derivation
+	resolver   the hardened HTTPS authority client
+	peer       source-neutral Peer state and observation reconciliation
+	envelope   the sealed message envelope, with MKDP1 identifiers bound as AAD
+	component  optional glue beans, for dependency-injection applications
+
+The interfaces here are the integration seam: a host application depends on
+Resolver, Store, Service and PrivateKeyLookup, not on the implementations, so
+it can substitute its own storage, its own HTTP stack, or an HSM without
+weakening the protocol's validation.
+*/
+package mailkey
+
+import (
+	"context"
+	"time"
+)
+
+// Version is the protocol version token carried by every MKDP1 object.
+const Version = "MKDP1"
+
+// Mode is the only discovery mode in MKDP1: resolve over HTTPS.
+const Mode = "https"
+
+// HeaderName is the mail header that advertises MKDP1 capability.
+const HeaderName = "Mail-Key"
+
+// DNSPrefix is the label prefixed to a domain to form the TXT owner name.
+const DNSPrefix = "_mailkey"
+
+// HostPrefix is the label prefixed to a domain to form the discovery host.
+const HostPrefix = "mail"
+
+// WellKnownPath is the fixed path of the discovery endpoint.
+const WellKnownPath = "/.well-known/mail-key"
+
+// MediaType is the recommended content type of the discovery response.
+const MediaType = "application/vnd.mailnite.mail-key+msgpack"
+
+// MaxBodyBytes bounds a discovery response before it is allocated.
+const MaxBodyBytes = 16 << 10
+
+// Registered algorithm and encryption identifiers. These name the key TYPE and
+// the bulk cipher in the manifest; the exact construction that consumes them
+// (key derivation, nonce, associated data) is identified by the envelope's own
+// suite — see the envelope package.
+const (
+	AlgX25519    = "x25519"
+	EncAES256GCM = "aes256gcm"
+)
+
+// ManifestID is SHA-256 of the canonical manifest bytes: the identity of one
+// immutable fetched manifest. DNS and headers carry it as unpadded base64url.
+type ManifestID [32]byte
+
+// KeyID ("kid") is SHA-256 of the canonical key descriptor — domain, alg, enc
+// and public key. It is a deterministic CONTENT identifier, computed
+// independently by sender and receiver, and used by the receiver for direct
+// private-key lookup. It is not, and must never be used as, an ordering value.
+type KeyID [32]byte
+
+// KeyDescriptor is the key half of a manifest: what KeyID is computed over.
+type KeyDescriptor struct {
+	Kid        KeyID
+	Algorithm  string
+	Encryption string
+	PublicKey  []byte
+}
+
+// Manifest is a domain's current published key, as fetched and validated.
+// Manifests are immutable: a new one replaces the effective manifest whole.
+type Manifest struct {
+	Version   string
+	Domain    string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
+	Key       KeyDescriptor
+}
+
+// Source is where an observation came from. Sources have different operational
+// origins and NO different cryptographic weight: none of them installs a key.
+type Source string
+
+const (
+	SourceDNS    Source = "dns"
+	SourceHeader Source = "header"
+	SourceManual Source = "manual"
+)
+
+// Advertisement is a parsed observation: a claim that a domain speaks MKDP1,
+// and optionally the manifest id the observer saw. It carries no key material.
+type Advertisement struct {
+	Version    string
+	Domain     string
+	ManifestID ManifestID
+	HasID      bool
+	Mode       string
+}
+
+// Result is one successful authority fetch: the validated manifest plus the
+// exact bytes it was validated from (the bytes ARE the identity — never
+// re-serialize them to recompute the id).
+type Result struct {
+	Manifest   Manifest
+	ManifestID ManifestID
+	Raw        []byte
+	FetchedAt  time.Time
+	ExpiresAt  time.Time
+	TLSHost    string
+}
+
+// Resolver fetches and validates the effective manifest of a domain from the
+// deterministic HTTPS authority. Implementations own domain normalization, URL
+// construction, TLS validation, redirect refusal, transfer limits, canonical
+// parsing and manifest validation — a caller cannot opt out of any of them.
+type Resolver interface {
+	Resolve(ctx context.Context, domain string) (Result, error)
+}
+
+// PeerState is the lifecycle position of a Peer.
+type PeerState string
+
+const (
+	// StateDiscovered: an observation exists, no manifest has been accepted.
+	StateDiscovered PeerState = "discovered"
+	// StateActive: a valid effective manifest is available.
+	StateActive PeerState = "active"
+	// StateExpired: the effective manifest expired and no replacement arrived.
+	StateExpired PeerState = "expired"
+	// StateUnavailable: resolution failed and no usable manifest exists.
+	StateUnavailable PeerState = "unavailable"
+	// StateDisabled: an administrator disabled MKDP1 for this domain.
+	StateDisabled PeerState = "disabled"
+)
+
+// Policy is the local administrative delivery policy for a domain.
+type Policy string
+
+const (
+	// PolicyAuto encrypts when a valid manifest is available.
+	PolicyAuto Policy = "auto"
+	// PolicyRequire refuses plaintext: with no valid manifest, mail waits or
+	// fails rather than being sent in the clear. Only an administrator — or a
+	// successful HTTPS validation, never an observation — may arm this.
+	PolicyRequire Policy = "require"
+	// PolicyDisabled turns MKDP1 off for the domain entirely.
+	PolicyDisabled Policy = "disabled"
+)
+
+// ObservationStatus is how an observation compares to the effective manifest.
+type ObservationStatus string
+
+const (
+	ObservationPending      ObservationStatus = "pending"
+	ObservationConfirmed    ObservationStatus = "confirmed"
+	ObservationStale        ObservationStatus = "stale"
+	ObservationMalformed    ObservationStatus = "malformed"
+	ObservationInconsistent ObservationStatus = "inconsistent"
+)
+
+// Observation is one untrusted sighting of a domain's MKDP1 capability.
+type Observation struct {
+	Source     Source
+	ManifestID ManifestID
+	HasID      bool
+	ObservedAt time.Time
+	Status     ObservationStatus
+	// Context is a privacy-minimized origin note (an internal message
+	// reference, the resolver name) — never message content.
+	Context string
+}
+
+// ManifestStatus is a stored manifest's role for its Peer.
+type ManifestStatus string
+
+const (
+	ManifestEffective  ManifestStatus = "effective"
+	ManifestHistorical ManifestStatus = "historical"
+)
+
+// ManifestRecord is a stored manifest: the immutable bytes, their identity and
+// how they were obtained.
+type ManifestRecord struct {
+	ManifestID     ManifestID
+	CanonicalBytes []byte
+	Kid            KeyID
+	IssuedAt       time.Time
+	ExpiresAt      time.Time
+	FetchedAt      time.Time
+	AuthorityHost  string
+	TLSVerified    bool
+	Status         ManifestStatus
+}
+
+// Peer is the domain-level record: one per email domain, no matter how many
+// sources observed it.
+type Peer struct {
+	Domain    string
+	State     PeerState
+	Policy    Policy
+	Effective *ManifestRecord
+	// History holds superseded manifests for diagnostics (the private keys
+	// they name are retained separately, by the receiver).
+	History        []ManifestRecord
+	Observations   []Observation
+	LastVerifiedAt time.Time
+	NextRefreshAt  time.Time
+	LastError      string
+	// AuthorityUnstable marks a domain whose authority alternates between
+	// different valid manifests. MKDP1 refuses to invent a tie-break rule, so
+	// this surfaces as a warning for a human instead.
+	AuthorityUnstable bool
+}
+
+// Store is the persistence seam. Implementations may use any database; the
+// protocol requires only that InstallManifest is atomic.
+type Store interface {
+	// GetPeer returns the peer, or nil without error when unknown.
+	GetPeer(ctx context.Context, domain string) (*Peer, error)
+	// ListPeers enumerates every known peer.
+	ListPeers(ctx context.Context) ([]Peer, error)
+	// PutObservation appends (or coalesces) an observation, creating a
+	// discovered peer when the domain is new.
+	PutObservation(ctx context.Context, domain string, o Observation) error
+	// InstallManifest atomically persists the fetched manifest, demotes the
+	// previous effective manifest to historical, sets the new one effective,
+	// reconciles observations against its id and updates peer status.
+	InstallManifest(ctx context.Context, domain string, r Result) error
+	// RecordFailure stores a resolution error without disturbing a manifest
+	// that is still valid.
+	RecordFailure(ctx context.Context, domain string, err error) error
+	// SetPolicy applies an administrative policy.
+	SetPolicy(ctx context.Context, domain string, p Policy) error
+	// ForgetPeer deletes cached manifests and observations. It is not a
+	// blocklist: the domain may be rediscovered later.
+	ForgetPeer(ctx context.Context, domain string) error
+}
+
+// Service is the protocol's application-facing behavior: observations in,
+// validated keys out.
+type Service interface {
+	// ObserveDNS records TXT observations for a domain and schedules
+	// resolution when they indicate the cache may be stale.
+	ObserveDNS(ctx context.Context, domain string, txt []string) error
+	// ObserveHeader records a Mail-Key header observation. It must never
+	// block or fail inbound mail processing.
+	ObserveHeader(ctx context.Context, headerValue, context string) error
+	// AddPeer resolves a domain on an administrator's request.
+	AddPeer(ctx context.Context, domain string) (Peer, error)
+	// Refresh forces authority resolution for a known domain.
+	Refresh(ctx context.Context, domain string) (Peer, error)
+	// ResolveForEncryption returns a usable manifest for the outbound path:
+	// the valid cached one when there is one, otherwise a fresh fetch. It
+	// returns ErrNoKey when the domain has no usable key, which the caller
+	// interprets according to the peer's policy.
+	ResolveForEncryption(ctx context.Context, domain string) (Result, error)
+	// Forget removes cached state for a domain.
+	Forget(ctx context.Context, domain string) error
+}
+
+// KeyHandle is an opaque reference to a private key: raw bytes for a software
+// key, or a handle an HSM understands. The library never inspects it.
+type KeyHandle any
+
+// PrivateKeyLookup resolves an inbound envelope's kid to the receiver's
+// private key. Implementations MUST NOT rebind an existing kid to a different
+// key descriptor — that is a critical integrity error, not an update.
+type PrivateKeyLookup interface {
+	FindPrivateKey(ctx context.Context, domain string, kid KeyID) (KeyHandle, error)
+}
+
+// Publisher is the receiving side of the protocol: it owns the current key and
+// serves the canonical manifest bytes at the well-known endpoint.
+type Publisher interface {
+	// CurrentManifest returns the prebuilt canonical bytes and their id for a
+	// hosted domain, or ok=false when the domain publishes no key. The bytes
+	// must be served verbatim — they are what the id was computed over.
+	CurrentManifest(domain string) (raw []byte, id ManifestID, expiresAt time.Time, ok bool)
+}
