@@ -255,47 +255,70 @@ Two defects fixed on the way, neither visible to unit tests:
   administrator happened to open the DNS page. `Bootstrap` now mints it, as
   adding a domain always did.
 
-## Phase 8 — key lifecycle UI, Peers UI and outbound policy
+## Phase 8 — key lifecycle UI, Peers UI and outbound policy ✅
 
 ### Our own keys: a per-domain section on Administration → Domains
 
-The receiving half now has a lifecycle an operator can no longer see: a key is
-issued, published for a bounded validity, replaced by a rotation, retained while
-delayed mail may still name it, then pruned. Phases 5–6 put all of that under
-the floor — `retentionFloor()`, `pruneRetired`, `Invalidate` — with no surface
-that shows or drives it. Each hosted domain gets:
+The receiving half had a lifecycle nothing could see: a key is issued, published
+for a bounded validity, replaced by a rotation, retained while delayed mail may
+still name it, then pruned. `DomainKeysCard` shows it per hosted domain — current
+`kid` and since when, whether the endpoint is actually publishing (with the
+manifest id and how long senders may cache it), the retired generations with
+their retirement and prunable dates, and the retention window.
 
-- **State**: whether the domain has a key at all, its `kid`, the published
-  manifest id, when it was issued and when it expires. A hosted domain with no
-  key publishes nothing and receives everything in cleartext — today that is
-  invisible, which is the worst way for it to be true.
-- **Issue** for a domain that has no key yet (added after onboarding, so it never
-  passed through the wizard's key step).
-- **Rotate**, stating the consequence plainly: senders keep using the previous
-  key until their cached manifest expires, so both generations must stay
-  openable — which is what the retention floor guarantees.
-- **Retired generations**: how many, each one's retirement date and the date it
-  becomes prunable, so "why is this key still here" has an answer on screen.
-- **Retention**: the floor (manifest lifetime + delivery window + margin) shown
-  as the derived number it is, with the operator's own longer value editable and
-  a shorter one refused, matching the code.
+Two states are surfaced as problems rather than merely rendered, because both are
+silent losses rather than errors: a hosted domain with **no key** (every
+correspondent then sends to it in cleartext) and a key that exists while
+publishing is switched off. They are reported separately because they have the
+same symptom and different fixes.
 
-Deliberately **not** part of onboarding: the wizard issues the primary domain's
-key and moves on. This section is for the second domain, the rotation a year
-later, and the "what is actually published for us" question — day-two work, not
-first-run work.
+Actions: **Issue** for a domain that has none, and **Rotate** behind a
+confirmation that states the consequence — senders keep using the previous key
+until their cached manifest expires, so both generations must stay openable.
+Retention below the floor is **refused, not clamped**: a clamped value reads as
+accepted, and an operator would then trust a window that is not in force.
+
+`api.KeyService` gained `ServerKeyStatus`, which returns public halves only — an
+administration surface must be able to ask "what state are these keys in" without
+being able to extract anything. `FloorDays` reports the CONSTANT minimum rather
+than the effective window, so a value the operator chose never looks like a limit
+the software imposes.
+
+Deliberately not part of onboarding: the wizard issues the primary domain's key
+and moves on.
 
 ### Peers
 
-- The Administration → Peers page reshaped to the Peer model: state, effective
-  manifest id, `kid`, expiry, last verification, observed sources, policy, last
-  error; actions Add / Refresh / Require encryption / Return to automatic /
-  Forget.
-- Outbound policy: hold-and-retry rather than silent plaintext for a validated
-  peer with no usable manifest (F-4), fail-closed armed only by HTTPS validation
-  or explicit administrator action.
-- The conflict card retires with the ordering rules it existed to arbitrate;
-  authority instability takes its place.
+The page already carried the Peer model from phase 5 (state, `kid`, expiry,
+observed sources, policy including require/automatic/disabled, last error, the
+instability marker, Add/Refresh/Forget). Phase 8 added the two fields it was
+missing — the effective **manifest id** and **last verified** time — as sub-lines
+under the identifiers they qualify. The conflict card is gone with the ordering
+rules it existed to arbitrate; authority instability took its place.
+
+### Outbound policy: hold, never leak, never bounce (F-4)
+
+`PolicyRequire` now has teeth. `peer.Service.ResolveForEncryption` applies the
+policy to a discovery failure and reports `mailkey.ErrEncryptionRequired` —
+wrapping the cause, so an operator still sees *why* discovery failed — and
+mailnite's resolver adapter passes that one error through instead of translating
+it into "no key", which would mean cleartext.
+
+The queue turns it into a **temporary refusal of the whole submission**, before
+anything is stored:
+
+- Nothing is sent in the clear, which is the point.
+- Nothing is bounced. The refusal is `api.ErrEncryptionRequired`, and the SMTP
+  session answers **451** — a permanent rejection would let anyone who can make
+  an authority unreachable destroy mail instead of merely delaying it, which is
+  the self-DoS half of F-4.
+- Nothing is partially enqueued. Discovery moved into a pre-pass over all
+  recipients, so a mixed submission is refused atomically; storing the reachable
+  recipients and failing would make the sender's retry deliver those twice.
+
+Discovery stays at accept time rather than delivery time, and that is now stated
+where it is enforced: the queue seals and THEN DKIM-signs, so sealing later would
+invalidate a signature already computed over the stored bytes.
 
 ## Phase 9 — interoperability gate
 

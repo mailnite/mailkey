@@ -318,9 +318,24 @@ func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mail
 	}
 	res, rerr := s.resolve(ctx, d, false)
 	if rerr != nil {
-		return mailkey.Result{}, rerr
+		return mailkey.Result{}, s.policyFailure(p, d, rerr)
 	}
 	return res, nil
+}
+
+// policyFailure applies the peer's policy to a discovery failure. Under
+// PolicyRequire the caller must be told that plaintext is not an option, and it
+// must be told in a way that cannot be mistaken for a permanent rejection — see
+// mailkey.ErrEncryptionRequired.
+//
+// Under the automatic policy the failure passes through unchanged: the caller
+// then decides, and for ordinary mail that decision is cleartext, exactly as it
+// was before this protocol existed.
+func (s *Service) policyFailure(p *mailkey.Peer, domain string, cause error) error {
+	if p != nil && p.Policy == mailkey.PolicyRequire {
+		return mailkey.FailRequired(domain, cause)
+	}
+	return cause
 }
 
 // Forget removes cached state for a domain.

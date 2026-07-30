@@ -86,4 +86,43 @@ var (
 	// ErrKidRebind: an attempt to map an existing kid to a different key
 	// descriptor. A critical integrity error, never an update.
 	ErrKidRebind = errors.New("mailkey: kid is already bound to a different key")
+	// ErrEncryptionRequired: the domain's policy refuses plaintext and no usable
+	// manifest is available right now.
+	//
+	// This is the fail-closed half of PolicyRequire, and it is deliberately a
+	// TEMPORARY condition rather than a rejection. A discovery failure is usually
+	// a network or authority problem that resolves itself, and treating it as
+	// permanent would hand an attacker a way to destroy mail simply by making the
+	// authority unreachable — the self-DoS the security review calls F-4. A
+	// caller must translate it into "try again later", never into a bounce, and
+	// never into sending in cleartext.
+	ErrEncryptionRequired = errors.New("mailkey: this domain requires encryption and no usable key is available")
 )
+
+// requiredError reports ErrEncryptionRequired while preserving the underlying
+// failure, so a caller can log WHY discovery failed and still act on the policy.
+type requiredError struct {
+	domain string
+	cause  error
+}
+
+// FailRequired wraps a discovery failure for a domain whose policy refuses
+// plaintext.
+func FailRequired(domain string, cause error) error {
+	return &requiredError{domain: domain, cause: cause}
+}
+
+func (e *requiredError) Error() string {
+	if e.cause == nil {
+		return "mailkey: " + e.domain + " requires encryption and no usable key is available"
+	}
+	return "mailkey: " + e.domain + " requires encryption and no usable key is available: " + e.cause.Error()
+}
+
+// Is matches the sentinel; Unwrap exposes the cause, so ClassOf still reports
+// the transport class underneath.
+func (e *requiredError) Is(target error) bool { return target == ErrEncryptionRequired }
+func (e *requiredError) Unwrap() error        { return e.cause }
+
+// Domain names the peer whose policy applies.
+func (e *requiredError) Domain() string { return e.domain }

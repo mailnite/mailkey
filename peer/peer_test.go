@@ -607,3 +607,55 @@ func TestNeedsRefreshTriggers(t *testing.T) {
 		t.Fatal("a disabled peer must not resolve")
 	}
 }
+
+// TestRequirePolicyRefusesPlaintext is F-4's fail-closed half: for a domain an
+// administrator marked "require", a discovery failure must be reported as
+// "encryption required, not available yet" — never as an absent key the caller
+// would answer with cleartext.
+//
+// It must also stay TEMPORARY. If it read as a permanent rejection, anyone able
+// to make an authority unreachable could destroy mail to that domain instead of
+// merely delaying it.
+func TestRequirePolicyRefusesPlaintext(t *testing.T) {
+	st := peer.NewMemStore(nil)
+	svc := peer.NewService(&fakeResolver{err: mailkey.Failf(mailkey.FailureNetwork, "resolve", "boom")}, st, peer.Options{Workers: 1, QueueSize: 4})
+	defer svc.Close()
+	ctx := context.Background()
+
+	// Automatic policy: the failure passes through, and the caller is free to
+	// send cleartext.
+	_, err := svc.ResolveForEncryption(ctx, "auto.test")
+	if err == nil {
+		t.Fatal("a failing authority must report an error")
+	}
+	if errors.Is(err, mailkey.ErrEncryptionRequired) {
+		t.Fatal("the automatic policy must not demand encryption")
+	}
+
+	// Require policy: the same failure now forbids plaintext.
+	if err := st.SetPolicy(ctx, "strict.test", mailkey.PolicyRequire); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.ResolveForEncryption(ctx, "strict.test")
+	if !errors.Is(err, mailkey.ErrEncryptionRequired) {
+		t.Fatalf("require policy must report ErrEncryptionRequired, got %v", err)
+	}
+	// The cause survives, so an operator can still see WHY discovery failed.
+	if !stringsContains(err.Error(), "boom") {
+		t.Fatalf("the underlying failure must be preserved: %v", err)
+	}
+	// And it is not the "no key here" answer, which would mean cleartext.
+	if errors.Is(err, mailkey.ErrNoKey) {
+		t.Fatal("a required domain's failure must not read as an absent key")
+	}
+}
+
+// stringsContains avoids importing strings for one assertion.
+func stringsContains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
