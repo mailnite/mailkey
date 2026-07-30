@@ -107,7 +107,16 @@ Mandatory defenses (all implemented in `resolver`):
 5. Rate limit by target domain (and by observation source where available).
 6. Header-triggered resolution is always asynchronous.
 7. Private ranges reachable only via an explicit opt-in setting for split-DNS
-   deployments (default off).
+   deployments (default off) — and that opt-in deliberately does **not** widen
+   to link-local: `169.254.169.254` and its IPv6 equivalents are the cloud
+   metadata services, the highest-value SSRF target there is, and no mail
+   authority has ever legitimately lived there. Reserved space (CGNAT, TEST-NET,
+   NAT64, documentation, 240/4) stays refused in both modes.
+
+All seven are implemented in `resolver` and covered by tests that assert the
+failure *class*, not just that an error occurred: a metadata address that merely
+timed out would pass a weaker test while remaining reachable on a host where it
+answers.
 
 ### 3.5 Envelope metadata tampering — **F-1, critical, present in today's code**
 
@@ -231,8 +240,37 @@ reason the retention floor must not become an unbounded archive.
 | F-8 | Low | Clock skew / lifetime bounds | Enforced in `Validate`, cache headers ≤ `expires_at` |
 | F-9 | Low | Retired-key retention floor is a correctness requirement | Enforced default, retire-not-delete |
 | F-10 | Info | No CT, no pinned signing key | Documented accepted limitation |
+| F-11 | Medium | Domain normalization was not idempotent (a Punycode A-label whose decoded form is invalid normalized once, then failed on its own output) | `Normalize` verifies stability and rejects; found by fuzzing |
+| F-12 | Medium | Base64url identifiers had multiple valid spellings (unused trailing bits ignored), so one id could be advertised under different-looking strings | `DecodeID` requires the canonical spelling; found by fuzzing |
 
 ---
+
+## 4a. Findings from fuzzing
+
+Two of the ten findings above were reasoned out from the spec; **F-11 and F-12
+were found by the fuzzers**, and both were live defects in code that had passing
+hand-written tests. They are worth recording because of what they have in
+common: each was a *canonicality* bug, and each would have surfaced as an
+interoperability failure rather than an obvious break.
+
+- **F-11 — normalization was not idempotent.** `Normalize("0.\x84")` produced
+  `0.xn--zn7c`, and normalizing *that* failed IDNA validation. The domain sits
+  inside the `kid` preimage, so two code paths that normalized a different
+  number of times would compute different key identifiers for the same key. The
+  fix verifies stability and rejects anything without a fixed point — fail
+  closed, one canonical spelling.
+- **F-12 — identifiers had multiple spellings.** Base64 leaves the final
+  character's unused low bits free, so `…001` and `…000` decode to the same 32
+  bytes. Beyond the interoperability problem (a string comparison of ids
+  reporting a false mismatch), it hands an observer a way to advertise the same
+  manifest under a different-looking id and trigger pointless refreshes. The
+  decoder now requires the input to re-encode to itself.
+
+The property that caught both is the same one the protocol depends on: *anything
+accepted must round-trip to exactly what was accepted*. That invariant is now
+asserted by fuzz targets over the manifest parser, the identifier decoder,
+domain normalization and the header parser, and the failing inputs are kept as
+regression corpus.
 
 ## 5. Verdict
 

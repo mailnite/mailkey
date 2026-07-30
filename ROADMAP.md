@@ -16,7 +16,7 @@ Phase 1 is done; the rest is planned in the order dependencies allow.
   wire format.
 - `SECURITY-REVIEW.md` — attack analysis and findings F-1…F-10.
 
-## Phase 2 — hardened resolver
+## Phase 2 — hardened resolver ✅
 
 `mailkey/resolver`: the only code that installs a key, and the only code a
 remote attacker can trigger. Everything in the security review §3.4 lands here:
@@ -32,8 +32,22 @@ remote attacker can trigger. Everything in the security review §3.4 lands here:
 - Canonical parse plus `manifest.Validate`, with the requested domain pinned.
 - Per-domain single-flight and a global concurrency cap; a bounded trigger queue
   that drops rather than grows.
-- Injected `net.Resolver` and `http.Client` seams for tests — a substitution
-  must not be able to weaken the address or redirect policy.
+- ONE injection seam (`LookupFunc`, name resolution) instead of an injectable
+  HTTP client: a substitution cannot weaken anything, because the address policy
+  runs on whatever it returns and TLS still validates the derived hostname. The
+  port escape needed by tests and split-DNS deployments is honoured only
+  together with the private-targets opt-in, so a default configuration can never
+  be pointed at another port.
+- Failure classification (`mailkey.FailureClass`): network, TLS, absent, http,
+  protocol, policy. A 404 is a definitive "this domain does not speak MKDP1",
+  not an outage; a 200 carrying an invalid object is an alarm. Callers act on
+  the class, never on error text.
+- Tests: a real TLS authority with its own CA (hostname mismatch, untrusted
+  issuer and expired certificate all asserted by class), the full address-policy
+  table including the mapped-IPv4 bypass and cloud metadata, DNS rebinding
+  across two connections, redirect refusal, single-flight (20 callers → 1
+  request), timeouts, body caps before and after read, cache-lifetime bounding,
+  and fuzz targets over every parser.
 
 ## Phase 3 — Peer store and service
 

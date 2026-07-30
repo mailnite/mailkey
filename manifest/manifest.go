@@ -317,7 +317,13 @@ func Validate(m mailkey.Manifest, now time.Time, limits Limits) error {
 func EncodeID(id [32]byte) string { return base64.RawURLEncoding.EncodeToString(id[:]) }
 
 // DecodeID parses an unpadded base64url identifier. Padding, wrong length and
-// non-base64url alphabets are all refused.
+// non-base64url alphabets are all refused — and so is a non-canonical spelling:
+// base64 leaves the final character's unused low bits free, so "…001" and
+// "…000" decode to the same 32 bytes. Accepting both would give one identifier
+// two spellings, which turns a string comparison of ids into a false mismatch
+// (and hands an observer a way to advertise the "same" manifest under a
+// different-looking id to trigger pointless refreshes). Requiring the input to
+// re-encode to itself leaves exactly one spelling per identifier.
 func DecodeID(s string) ([32]byte, error) {
 	var out [32]byte
 	b, err := base64.RawURLEncoding.DecodeString(s)
@@ -328,6 +334,9 @@ func DecodeID(s string) ([32]byte, error) {
 		return out, xerrors.Errorf("identifier: must be %d bytes, got %d", len(out), len(b))
 	}
 	copy(out[:], b)
+	if EncodeID(out) != s {
+		return [32]byte{}, xerrors.Errorf("identifier: %q is not the canonical spelling of its bytes", s)
+	}
 	return out, nil
 }
 

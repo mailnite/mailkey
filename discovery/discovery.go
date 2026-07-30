@@ -107,6 +107,20 @@ func Normalize(domain string) (string, error) {
 	if net.ParseIP(ascii) != nil {
 		return "", xerrors.Errorf("domain: %q resolves to an IP literal form", domain)
 	}
+	// Idempotence, verified rather than assumed. Some Punycode labels convert
+	// once and then fail validation on their own output (an A-label whose
+	// decoded form is invalid), which would make the accepted spelling depend
+	// on how many times normalization ran. The domain is inside the kid
+	// preimage, so two code paths disagreeing about its spelling would break
+	// interoperability — reject instead, and let the one canonical spelling be
+	// the only accepted one.
+	stable, err := idnaProfile.ToASCII(ascii)
+	if err != nil {
+		return "", xerrors.Errorf("domain %q: unstable normalization: %w", domain, err)
+	}
+	if strings.ToLower(strings.TrimSuffix(stable, ".")) != ascii {
+		return "", xerrors.Errorf("domain %q has no stable normal form (%q then %q)", domain, ascii, stable)
+	}
 	return ascii, nil
 }
 

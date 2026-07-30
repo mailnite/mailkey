@@ -1,0 +1,2 @@
+go test fuzz v1
+string("v=MKDP1;d=0.\xc1")

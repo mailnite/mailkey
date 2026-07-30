@@ -1,0 +1,448 @@
+/*
+ *
+ * Copyright 2022-present Karagatan LLC. All rights reserved.
+ *
+ */
+
+/*
+Package resolver is the MKDP1 authority client: the ONLY code that can install
+a key, and the only code a remote party can cause to run.
+
+That second property is what shapes this package. A stranger's email carrying a
+Mail-Key header makes this server issue an HTTPS request to a domain the
+stranger chose, so the request is treated as hostile from both ends: the target
+must be provably the domain's own authority, and the response must be provably
+a canonical MKDP1 manifest before any of it is believed.
+
+Every safeguard is on by default and none of them is a caller's option:
+
+	target      derived from the normalized domain — no host, port, path or URL
+	            from any observation ever reaches the network layer
+	transport   HTTPS only, port 443 only, GET only, redirects refused
+	addresses   every resolved address checked against AddressPolicy on every
+	            connection (the DNS-rebinding defense), private ranges opt-in
+	TLS         WebPKI chain and hostname validation for mail.<domain>, TLS 1.2+
+	transfer    whole-request deadline, 16 KiB body cap enforced before reading
+	response    status 200 required, media type checked, canonical parse,
+	            requested domain pinned, kid recomputed, validity enforced
+	load        per-domain single flight, global concurrency cap
+
+The single injection seam is name resolution (LookupFunc). It cannot weaken
+anything: the address policy runs on whatever it returns, and TLS validates
+against the derived hostname regardless of where the connection went.
+*/
+package resolver
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/manifest"
+	"golang.org/x/xerrors"
+)
+
+// authorityPort is the only port MKDP1 speaks to.
+const authorityPort = "443"
+
+// Defaults for the transfer budget. They are deliberately tight: the endpoint
+// serves a few hundred prebuilt bytes, so a slow authority is a broken one, and
+// waiting on it costs the outbound path.
+const (
+	DefaultTimeout     = 8 * time.Second
+	DefaultDialTimeout = 4 * time.Second
+	DefaultConcurrency = 8
+)
+
+// Options configures a Resolver. The zero value is usable: every field falls
+// back to a safe default, and no field can turn a safeguard off except
+// AllowPrivateTargets, which exists for split-DNS deployments and is off here.
+type Options struct {
+	// Timeout bounds one whole resolution: connect, TLS, request, body.
+	Timeout time.Duration
+	// DialTimeout bounds one connection attempt.
+	DialTimeout time.Duration
+	// MaxBodyBytes caps the response body. Defaults to mailkey.MaxBodyBytes
+	// (16 KiB) and is clamped to it — a caller may tighten, never loosen.
+	MaxBodyBytes int64
+	// Limits are the manifest validity bounds.
+	Limits manifest.Limits
+	// AllowPrivateTargets permits loopback/private/link-local authorities.
+	// Off by default; see AddressPolicy.
+	AllowPrivateTargets bool
+	// PortOverride replaces the fixed authority port. It exists for tests and
+	// for split-DNS deployments that publish the endpoint elsewhere, and it is
+	// honoured ONLY together with AllowPrivateTargets — so a default
+	// configuration can never be pointed at a port other than 443, whatever
+	// else it sets.
+	PortOverride string
+	// MaxConcurrent caps resolutions in flight across all domains, so a header
+	// storm cannot turn into an outbound connection flood.
+	MaxConcurrent int
+	// Lookup replaces name resolution (tests, a custom resolver). nil = system.
+	Lookup LookupFunc
+	// RootCAs replaces the WebPKI trust store. nil = system pool. Supplying a
+	// pool NARROWS trust to it; it never disables verification.
+	RootCAs *x509.CertPool
+	// UserAgent identifies this client to the authority.
+	UserAgent string
+	// Now is the clock, for tests.
+	Now func() time.Time
+}
+
+// Resolver fetches and validates manifests from MKDP1 authorities.
+type Resolver struct {
+	opts   Options
+	policy AddressPolicy
+	// port is the authority port actually dialed: 443, unless a deployment
+	// deliberately opted into both private targets and an override.
+	port string
+
+	// inflight coalesces concurrent resolutions of the same domain into one
+	// request: DNS and header observations arrive in bursts, and a burst must
+	// cost one fetch, not one per observation.
+	mu       sync.Mutex
+	inflight map[string]*call
+
+	// sem is the global concurrency cap.
+	sem chan struct{}
+}
+
+// call is one in-flight resolution other callers may join.
+type call struct {
+	done chan struct{}
+	res  mailkey.Result
+	err  error
+}
+
+var _ mailkey.Resolver = (*Resolver)(nil)
+
+// New builds a Resolver. It never returns an unsafe configuration: out-of-range
+// values are replaced with defaults rather than honoured.
+func New(opts Options) *Resolver {
+	if opts.Timeout <= 0 {
+		opts.Timeout = DefaultTimeout
+	}
+	if opts.DialTimeout <= 0 || opts.DialTimeout > opts.Timeout {
+		opts.DialTimeout = min(DefaultDialTimeout, opts.Timeout)
+	}
+	if opts.MaxBodyBytes <= 0 || opts.MaxBodyBytes > mailkey.MaxBodyBytes {
+		opts.MaxBodyBytes = mailkey.MaxBodyBytes
+	}
+	if opts.Limits.MaxLifetime <= 0 || opts.Limits.MaxClockSkew <= 0 {
+		d := manifest.DefaultLimits()
+		if opts.Limits.MaxLifetime <= 0 {
+			opts.Limits.MaxLifetime = d.MaxLifetime
+		}
+		if opts.Limits.MaxClockSkew <= 0 {
+			opts.Limits.MaxClockSkew = d.MaxClockSkew
+		}
+	}
+	if opts.MaxConcurrent <= 0 {
+		opts.MaxConcurrent = DefaultConcurrency
+	}
+	if opts.Lookup == nil {
+		opts.Lookup = systemLookup
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	if opts.UserAgent == "" {
+		opts.UserAgent = "mailkey/1 (MKDP1)"
+	}
+	port := authorityPort
+	if opts.AllowPrivateTargets && opts.PortOverride != "" {
+		port = opts.PortOverride
+	}
+	return &Resolver{
+		opts:     opts,
+		policy:   AddressPolicy{AllowPrivate: opts.AllowPrivateTargets},
+		port:     port,
+		inflight: map[string]*call{},
+		sem:      make(chan struct{}, opts.MaxConcurrent),
+	}
+}
+
+// Resolve fetches, validates and returns the domain's effective manifest.
+//
+// Concurrent calls for the same domain share one request: the first caller
+// performs it and the rest wait for its outcome. That keeps an observation
+// burst — a mail flood, a DNS record change seen by many workers — down to a
+// single connection to the authority.
+func (r *Resolver) Resolve(ctx context.Context, domain string) (mailkey.Result, error) {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, domain, err)
+	}
+
+	r.mu.Lock()
+	if c, ok := r.inflight[d]; ok {
+		r.mu.Unlock()
+		select {
+		case <-c.done:
+			return c.res, c.err
+		case <-ctx.Done():
+			return mailkey.Result{}, mailkey.Fail(mailkey.FailureNetwork, d, ctx.Err())
+		}
+	}
+	c := &call{done: make(chan struct{})}
+	r.inflight[d] = c
+	r.mu.Unlock()
+
+	c.res, c.err = r.fetch(ctx, d)
+
+	r.mu.Lock()
+	delete(r.inflight, d)
+	r.mu.Unlock()
+	close(c.done)
+	return c.res, c.err
+}
+
+// fetch performs one resolution: acquire a slot, build the request from the
+// domain alone, validate everything.
+func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) {
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	case <-ctx.Done():
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailureNetwork, d, ctx.Err())
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
+	defer cancel()
+
+	u, err := discovery.DiscoveryURL(d)
+	if err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, d, err)
+	}
+	host, err := discovery.AuthorityHost(d)
+	if err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, d, err)
+	}
+	// With an override in force the URL carries the port; the TLS ServerName
+	// stays the derived hostname either way, so certificate validation is
+	// unaffected by where the connection went.
+	if r.port != authorityPort {
+		u.Host = net.JoinHostPort(host, r.port)
+	}
+
+	client := r.clientFor(d, host)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, d, err)
+	}
+	req.Header.Set("Accept", mailkey.MediaType)
+	req.Header.Set("User-Agent", r.opts.UserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return mailkey.Result{}, classifyTransportError(d, err)
+	}
+	defer func() {
+		// Drain a bounded amount so the connection can be reused, then close.
+		_, _ = io.CopyN(io.Discard, resp.Body, 1<<10)
+		_ = resp.Body.Close()
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusGone:
+		// A definitive "no MKDP1 here" — not a failure to retry hard.
+		return mailkey.Result{}, mailkey.Failf(mailkey.FailureAbsent, d,
+			"the authority answered %d: this domain does not publish an MKDP1 manifest", resp.StatusCode)
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		// The endpoint is public by definition; an auth prompt means we are
+		// talking to something that is not the MKDP1 authority.
+		return mailkey.Result{}, mailkey.Failf(mailkey.FailureHTTP, d,
+			"the authority requested authentication (%d); the MKDP1 endpoint is public", resp.StatusCode)
+	default:
+		return mailkey.Result{}, mailkey.Failf(mailkey.FailureHTTP, d, "the authority answered %d", resp.StatusCode)
+	}
+
+	// Content-Length, when present, is checked before a single byte is read.
+	if resp.ContentLength > r.opts.MaxBodyBytes {
+		return mailkey.Result{}, mailkey.Failf(mailkey.FailureHTTP, d,
+			"the response declares %d bytes, over the %d byte limit", resp.ContentLength, r.opts.MaxBodyBytes)
+	}
+	if err := checkMediaType(resp.Header.Get("Content-Type")); err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailureHTTP, d, err)
+	}
+
+	// Read one byte past the cap: if it arrives, the body is oversized.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, r.opts.MaxBodyBytes+1))
+	if err != nil {
+		return mailkey.Result{}, classifyTransportError(d, err)
+	}
+	if int64(len(body)) > r.opts.MaxBodyBytes {
+		return mailkey.Result{}, mailkey.Failf(mailkey.FailureHTTP, d,
+			"the response body exceeds the %d byte limit", r.opts.MaxBodyBytes)
+	}
+
+	// From here on the bytes are the object: parse canonically, pin the
+	// requested domain, recompute kid, enforce validity.
+	m, err := manifest.ParseCanonical(body, d)
+	if err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailureProtocol, d, err)
+	}
+	now := r.opts.Now()
+	if err := manifest.Validate(m, now, r.opts.Limits); err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailureProtocol, d, err)
+	}
+
+	return mailkey.Result{
+		Manifest:   m,
+		ManifestID: manifest.ManifestIDOf(body),
+		Raw:        body,
+		FetchedAt:  now,
+		// The cache may never outlive the manifest, and an authority that asks
+		// for a shorter life gets it.
+		ExpiresAt: cacheUntil(m.ExpiresAt, now, resp.Header.Get("Cache-Control")),
+		TLSHost:   host,
+	}, nil
+}
+
+// clientFor builds a single-use client pinned to this domain's authority. A
+// fresh transport per resolution costs one handshake and buys certainty: no
+// connection, DNS answer or TLS session is reused across domains, and the
+// dialer carries this domain's identity for error attribution.
+func (r *Resolver) clientFor(domain, host string) *http.Client {
+	d := &dialer{
+		policy:  r.policy,
+		lookup:  r.opts.Lookup,
+		port:    r.port,
+		timeout: r.opts.DialTimeout,
+		domain:  domain,
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext:            d.DialContext,
+			TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host, RootCAs: r.opts.RootCAs},
+			TLSHandshakeTimeout:    r.opts.DialTimeout,
+			ResponseHeaderTimeout:  r.opts.Timeout,
+			DisableKeepAlives:      true,
+			DisableCompression:     true,
+			ForceAttemptHTTP2:      true,
+			MaxResponseHeaderBytes: 8 << 10,
+			// No proxy: the authority is reached directly or not at all. A
+			// proxy would break the address policy's guarantee, since the
+			// policy could then only see the proxy's address.
+			Proxy: nil,
+		},
+		// Redirects are refused outright (spec §4). Following one would let an
+		// authority hand us off to a target our own derivation never approved.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return mailkey.Failf(mailkey.FailurePolicy, domain,
+				"MKDP1 does not follow redirects (the authority pointed at %s)", req.URL.Redacted())
+		},
+		Timeout: r.opts.Timeout,
+	}
+}
+
+// checkMediaType refuses a response whose declared type cannot be an MKDP1
+// manifest. A blank or octet-stream type is tolerated (the media type is a
+// SHOULD in the spec); an HTML error page served with status 200 is not.
+func checkMediaType(ct string) error {
+	if ct == "" {
+		return nil
+	}
+	base, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return xerrors.Errorf("unparsable content type %q", ct)
+	}
+	switch base {
+	case mailkey.MediaType, "application/octet-stream", "application/msgpack", "application/x-msgpack":
+		return nil
+	default:
+		return xerrors.Errorf("content type %q is not an MKDP1 manifest", base)
+	}
+}
+
+// cacheUntil bounds the cache lifetime by the manifest's own expiry, shortened
+// by a max-age the authority asked for.
+func cacheUntil(expiresAt, now time.Time, cacheControl string) time.Time {
+	if cacheControl == "" {
+		return expiresAt
+	}
+	for _, part := range splitList(cacheControl) {
+		k, v, ok := cut(part, "=")
+		if !ok || k != "max-age" {
+			continue
+		}
+		secs, err := strconv.Atoi(v)
+		if err != nil || secs < 0 {
+			continue
+		}
+		if until := now.Add(time.Duration(secs) * time.Second); until.Before(expiresAt) {
+			return until
+		}
+	}
+	return expiresAt
+}
+
+// classifyTransportError sorts a client error into a class a caller can act on:
+// a TLS failure on a domain that used to validate deserves attention, a refused
+// connection does not.
+func classifyTransportError(domain string, err error) error {
+	// A policy or network class assigned by our own dialer wins — it is more
+	// specific than anything inferable from the wrapped transport error.
+	if c := mailkey.ClassOf(err); c != "" {
+		return err
+	}
+	var certErr *tls.CertificateVerificationError
+	if xerrors.As(err, &certErr) {
+		return mailkey.Fail(mailkey.FailureTLS, domain, err)
+	}
+	var hostErr x509.HostnameError
+	if xerrors.As(err, &hostErr) {
+		return mailkey.Fail(mailkey.FailureTLS, domain, err)
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if xerrors.As(err, &unknownAuthority) {
+		return mailkey.Fail(mailkey.FailureTLS, domain, err)
+	}
+	var invalidCert x509.CertificateInvalidError
+	if xerrors.As(err, &invalidCert) {
+		return mailkey.Fail(mailkey.FailureTLS, domain, err)
+	}
+	return mailkey.Fail(mailkey.FailureNetwork, domain, err)
+}
+
+func splitList(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			out = append(out, trimSpace(s[start:i]))
+			start = i + 1
+		}
+	}
+	return out
+}
+
+func cut(s, sep string) (string, string, bool) {
+	for i := 0; i+len(sep) <= len(s); i++ {
+		if s[i:i+len(sep)] == sep {
+			return trimSpace(s[:i]), trimSpace(s[i+len(sep):]), true
+		}
+	}
+	return trimSpace(s), "", false
+}
+
+func trimSpace(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
