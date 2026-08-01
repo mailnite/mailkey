@@ -7,9 +7,12 @@
 package mailkey_test
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -18,6 +21,7 @@ import (
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/discovery"
 	"github.com/mailnite/mailkey/envelope"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/manifest"
 	"github.com/mailnite/mailkey/message"
 )
@@ -77,6 +81,23 @@ type vectorFile struct {
 		WireBase64          string `json:"wire_base64"`
 		Plaintext           string `json:"plaintext"`
 	} `json:"envelope"`
+	Identity struct {
+		Alg                 string `json:"alg"`
+		Domain              string `json:"domain"`
+		SeedHex             string `json:"seed_hex"`
+		PublicKeyHex        string `json:"public_key_hex"`
+		Fingerprint         string `json:"fingerprint"`
+		FingerprintType     string `json:"fingerprint_type"`
+		ManifestContext     string `json:"manifest_context"`
+		ManifestBytesHex    string `json:"manifest_bytes_hex"`
+		SignatureBase64     string `json:"signature_base64"`
+		HeaderIdentity      string `json:"header_identity"`
+		HeaderSigner        string `json:"header_signer"`
+		HeaderSignature     string `json:"header_signature"`
+		HeaderIdentityName  string `json:"header_identity_name"`
+		HeaderSignerName    string `json:"header_signer_name"`
+		HeaderSignatureName string `json:"header_signature_name"`
+	} `json:"identity"`
 }
 
 func loadVectors(t *testing.T) vectorFile {
@@ -323,4 +344,105 @@ func TestPublishedMessageVector(t *testing.T) {
 	if string(got) != v.Message.Inner {
 		t.Fatalf("opened message differs from the published inner message:\n%q", got)
 	}
+}
+
+/*
+TestPublishedIdentityVector recomputes every identity value in the vectors file.
+
+The point of a vector file is that a second implementation can check itself
+against it. That only holds if the file cannot drift from the code — a stale
+vector is worse than no vector, because it certifies agreement that no longer
+exists. So nothing here is read and trusted: the fingerprint, the signature and
+all three response fields are DERIVED from the published seed and manifest bytes
+and compared.
+*/
+func TestPublishedIdentityVector(t *testing.T) {
+	v := loadVectors(t)
+	in := v.Identity
+
+	seed := mustHex(t, in.SeedHex)
+	priv := ed25519.NewKeyFromSeed(seed)
+	pk := priv.Public().(ed25519.PublicKey)
+	if got := hex.EncodeToString(pk); got != in.PublicKeyHex {
+		t.Fatalf("public key = %s, vector says %s", got, in.PublicKeyHex)
+	}
+
+	fp, err := identity.FingerprintOf(in.Domain, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.EncodeID(fp); got != in.Fingerprint {
+		t.Fatalf("fingerprint = %s, vector says %s", got, in.Fingerprint)
+	}
+	if in.FingerprintType != identity.FingerprintType || in.Alg != identity.Alg {
+		t.Fatalf("vector names type/alg %q/%q, code says %q/%q",
+			in.FingerprintType, in.Alg, identity.FingerprintType, identity.Alg)
+	}
+	if in.ManifestContext != identity.ManifestContext {
+		t.Fatalf("vector context %q, code says %q", in.ManifestContext, identity.ManifestContext)
+	}
+
+	// The signature is over the SAME manifest bytes the manifest vector pins, so
+	// the two blocks cannot describe different objects.
+	raw := mustHex(t, in.ManifestBytesHex)
+	if got := hex.EncodeToString(raw); got != v.Manifest.CanonicalBytesHex {
+		t.Fatal("the identity vector signs different bytes than the manifest vector publishes")
+	}
+	sig := mustB64(t, in.SignatureBase64)
+	if err := identity.VerifyManifest(pk, in.Domain, raw, sig); err != nil {
+		t.Fatalf("the published signature does not verify: %v", err)
+	}
+	// Ed25519 is deterministic, so the signature is reproducible byte for byte —
+	// which is what lets another implementation check its own signing, not just
+	// its verification.
+	again, err := identity.SignManifest(priv, in.Domain, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, sig) {
+		t.Fatal("re-signing produced different bytes — the vector is not reproducible")
+	}
+
+	// The response fields, exactly as an implementation must emit and parse them.
+	if in.HeaderIdentityName != mailkey.HeaderIdentity ||
+		in.HeaderSignerName != mailkey.HeaderSigner ||
+		in.HeaderSignatureName != mailkey.HeaderSignature {
+		t.Fatal("the vector names different response fields than the code")
+	}
+	h := http.Header{}
+	identity.WriteProof(h, &mailkey.Proof{PublicKey: pk, Fingerprint: fp, Signature: sig})
+	for name, want := range map[string]string{
+		mailkey.HeaderIdentity:  in.HeaderIdentity,
+		mailkey.HeaderSigner:    in.HeaderSigner,
+		mailkey.HeaderSignature: in.HeaderSignature,
+	} {
+		if got := h.Get(name); got != want {
+			t.Fatalf("%s = %q, vector says %q", name, got, want)
+		}
+	}
+	proof, found, err := identity.ReadProof(h)
+	if err != nil || !found {
+		t.Fatalf("the vector's own fields must parse: found=%v err=%v", found, err)
+	}
+	if err := identity.Check(proof, in.Domain, raw); err != nil {
+		t.Fatalf("the vector's proof must check out: %v", err)
+	}
+}
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("hex %q: %v", s, err)
+	}
+	return b
+}
+
+func mustB64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("base64url %q: %v", s, err)
+	}
+	return b
 }

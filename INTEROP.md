@@ -122,8 +122,20 @@ a message tells a reader the one thing about it that carries no meaning.
 
 Stated because an implementer will otherwise assume otherwise:
 
-- **No certificate transparency check and no pinned signing key.** Authority
-  trust is WebPKI plus the fetch host, nothing more (F-10).
+- **No certificate transparency check.** (F-10.)
+- **Signing is published but not yet consumed.** A domain with an identity key
+  serves a detached Ed25519 proof (`Mail-Key-Identity` / `-Signer` /
+  `-Signature`; see the `identity` package, the `identity` vector block, and
+  spec 07 §2–4). The `identity` package verifies one, and the interop gate does
+  so from a second implementation. What does NOT exist yet is the SENDER half —
+  pin state, the trust decision, downgrade protection — so for now authority
+  trust in a running resolver is still WebPKI plus the fetch host. A verifier
+  that checks a proof and treats "the signature is internally consistent" as
+  "the domain is authentic" has gained nothing: the value comes from comparing
+  the fingerprint against a pin.
+- **No identity rotation chain.** Spec 07 §5 defines dual-signed rotation
+  statements and §4.2 the resource that serves them; neither is implemented.
+  Changing a domain's identity today means re-establishing trust out of band.
 - **No ordering rule, deliberately.** There is no sequence number and no
   "newest wins": an authority that alternates between two valid manifests is
   reported as unstable for a human to resolve. Inventing a tie-break here would

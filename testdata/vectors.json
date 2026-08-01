@@ -10,6 +10,24 @@
     "suite": "mkdp1-x25519-hkdf-sha256-aes256gcm",
     "wire_base64": "iqNhbGemeDI1NTE5qmNpcGhlcnRleHTEY47UWzVZCg/c6a393Wv3qumpKTj0ZwIoL/4FFigwZbhIiQQTzd0wPy06SrI7Kl2AVch1JW3m4GByM8tMp5u9dKwpcL2lG76pNbRCHkQuroyC5+L8oK2GjvLy8dVCsnQcZ0waGKZkb21haW6rZXhhbXBsZS5jb22jZW5jqWFlczI1NmdjbaxlcGhlbWVyYWxfcGvEIDEHMAFyv7b6xVAq/ISKkC4yyIqhxy7zTfshp427YaMPo2tpZMQgj807hgKANFmOyFtfBqWWcZQbVHZhbRXj6B65wAZ6cAarbWFuaWZlc3RfaWTEIFuRFHsN6VPjwN0t4PHsJPju87432LNW9flseTohzLMfpW5vbmNlxAz1Whtdao9CT0dxeSalc3VpdGXZIm1rZHAxLXgyNTUxOS1oa2RmLXNoYTI1Ni1hZXMyNTZnY22hdgE="
   },
+  "identity": {
+    "alg": "ed25519",
+    "domain": "example.com",
+    "fingerprint": "BX0wFgPTGeK5SHkHYtVbzUyISmt9ix30AP991HvjGbg",
+    "fingerprint_type": "mailkey-domain-identity-v1",
+    "header_identity": "ed25519:ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+    "header_identity_name": "Mail-Key-Identity",
+    "header_signature": "JGPUZcnFEyvcII3t_Bah96JoCFtrCzgZmeoLNTupCUklxB2Fmwo-mHekGqt-BSup0kQBCdGUrDbFAyvtDmZ3CQ",
+    "header_signature_name": "Mail-Key-Signature",
+    "header_signer": "BX0wFgPTGeK5SHkHYtVbzUyISmt9ix30AP991HvjGbg",
+    "header_signer_name": "Mail-Key-Signer",
+    "manifest_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c42042ca151eb3d40cf28b4c2e57b0038e670d702594217d8807caa48567c6257b7ea2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
+    "manifest_context": "mailkey/mkdp/manifest-signature/v1",
+    "note": "fingerprint = SHA256(canonical{type,domain,alg,pk}); signature = Ed25519 over (manifest_context || domain || manifest bytes). All three response fields must be present together; each value is unpadded base64url and must re-encode to itself. Mail-Key-Signer is a CLAIM: recompute it from the key.",
+    "public_key_hex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+    "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "signature_base64": "JGPUZcnFEyvcII3t_Bah96JoCFtrCzgZmeoLNTupCUklxB2Fmwo-mHekGqt-BSup0kQBCdGUrDbFAyvtDmZ3CQ"
+  },
   "manifest": {
     "canonical_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c42042ca151eb3d40cf28b4c2e57b0038e670d702594217d8807caa48567c6257b7ea2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
     "canonical_bytes_len": 164,
@@ -36,7 +54,7 @@
     "header_advertisement": "Mail-Key",
     "header_encrypted": "Mail-Key-Encrypted",
     "header_suite": "Mail-Key-Suite",
-    "inner": "From: alice@sender.test\r\nTo: bob@example.com\r\nDate: Mon, 30 Jul 2026 09:00:00 +0000\r\nMessage-Id: \u003cvector@sender.test\u003e\r\nSubject: the real subject is sealed\r\n\r\nthe body\r\n",
+    "inner": "From: alice@sender.test\r\nTo: bob@example.com\r\nDate: Mon, 30 Jul 2026 09:00:00 +0000\r\nMessage-Id: <vector@sender.test>\r\nSubject: the real subject is sealed\r\n\r\nthe body\r\n",
     "note": "The MKDP1 mail framing. Opening sealed_base64 with the envelope vector's recipient_private_hex must yield inner exactly. Only the routing headers and a placeholder Subject are in the clear; the real Subject and every other header travel inside the sealed payload.",
     "routing_headers": [
       "From",

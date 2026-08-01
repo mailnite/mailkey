@@ -67,6 +67,7 @@ fuzz:
 	go test ./discovery/ -run '^$$' -fuzz FuzzParseHeader    -fuzztime $(FUZZTIME)
 	go test ./discovery/ -run '^$$' -fuzz FuzzParseDNS       -fuzztime $(FUZZTIME)
 	go test ./envelope/  -run '^$$' -fuzz FuzzUnmarshal      -fuzztime $(FUZZTIME)
+	go test ./identity/  -run '^$$' -fuzz FuzzReadProof      -fuzztime $(FUZZTIME)
 
 ## tidy: tidy go.mod
 tidy:

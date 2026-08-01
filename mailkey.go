@@ -77,6 +77,34 @@ const HeaderEncrypted = "Mail-Key-Encrypted"
 const HeaderSuite = "Mail-Key-Suite"
 
 /*
+The three detached-proof fields on the well-known HTTPS RESPONSE. They are not
+mail headers and never appear on a message.
+
+The proof is detached rather than embedded because the deployed manifest parser
+requires an exact field set — an extra "signature" key inside the object would be
+rejected by every client already in the field. Keeping it outside means the
+manifest bytes are unchanged, manifest_id keeps its value and meaning, old
+clients validate exactly as before, and new clients get authentication for the
+cost of three response fields.
+
+All three or none: a subset is MALFORMED, not absent, because "the signature is
+missing" and "the signature is wrong" must never look the same. And the signer
+fingerprint is a CLAIM to check, never a value to trust — a verifier recomputes
+it from the supplied public key and rejects a mismatch, so a server cannot name a
+fingerprint its own key does not produce.
+*/
+const (
+	// HeaderIdentity carries the Ed25519 identity public key as
+	// "ed25519:<unpadded base64url>". Key material may travel only here — never
+	// in DNS, never in a mail header.
+	HeaderIdentity = "Mail-Key-Identity"
+	// HeaderSigner carries the identity fingerprint, unpadded base64url.
+	HeaderSigner = "Mail-Key-Signer"
+	// HeaderSignature carries the 64-byte Ed25519 signature, unpadded base64url.
+	HeaderSignature = "Mail-Key-Signature"
+)
+
+/*
 None of the three carries an "X-" prefix, deliberately.
 
 RFC 6648 deprecated that convention in 2012, and for the situation this protocol
@@ -131,6 +159,24 @@ type ManifestID [32]byte
 // independently by sender and receiver, and used by the receiver for direct
 // private-key lookup. It is not, and must never be used as, an ordering value.
 type KeyID [32]byte
+
+/*
+Fingerprint ("fp") is SHA-256 of a domain's canonical IDENTITY descriptor —
+type, domain, algorithm and Ed25519 public key. See the identity package.
+
+It is the longest-lived of the three identifiers and the only one a sender keeps
+across rotations, because it is the only one that answers "is this still the same
+authority". The other two answer narrower questions:
+
+	fp           the peer's trust anchor          years    pinned
+	kid          which key to seal to             days     follows rotation
+	manifest_id  which fetch this was             hours    provenance only
+
+Conflating them is the failure this extension exists to prevent: a manifest_id
+treated as a trust decision makes every re-issue look like a new authority, and a
+kid treated as one makes every routine key rotation an alarm.
+*/
+type Fingerprint [32]byte
 
 // KeyDescriptor is the key half of a manifest: what KeyID is computed over.
 type KeyDescriptor struct {
@@ -342,11 +388,53 @@ type PrivateKeyLookup interface {
 	FindPrivateKey(ctx context.Context, domain string, kid KeyID) (KeyHandle, error)
 }
 
+/*
+Publication is ONE immutable publication snapshot: the manifest bytes, their id,
+their validity, and the detached proof that authenticates exactly those bytes.
+
+It is a single value rather than four returns because the spec requires the
+handler to obtain one snapshot and serve all of its components together. A
+publisher that looked up the manifest and the current identity independently
+could pair a body from one build with a proof from another — and with detached
+proofs that is not a subtle inconsistency, it is a verification failure at every
+correspondent.
+
+The same shape also removes a defect that exists with no signing at all: two
+concurrent requests on a cold cache each building a manifest produce two
+different manifest_ids for the same key at the same instant, which receivers are
+entitled to read as an unstable authority. There is no way to express that bug
+against a type that hands out the whole snapshot at once.
+*/
+type Publication struct {
+	// Raw is served verbatim: it is what ID was computed over and what Proof
+	// signed. Callers must not modify it.
+	Raw       []byte
+	ID        ManifestID
+	ExpiresAt time.Time
+	// Proof is nil for a domain that publishes a key but no identity — a valid
+	// state, and the one every deployment starts in. Nil means "unsigned", never
+	// "unverified".
+	Proof *Proof
+}
+
+/*
+Proof is the detached authentication of a Publication: the Ed25519 identity
+public key, its fingerprint, and the signature over the manifest bytes.
+
+Declared here rather than in the identity package because Publisher lives here
+and the root package holds types only — the identity package owns every
+operation that computes, signs or checks one.
+*/
+type Proof struct {
+	PublicKey   []byte
+	Fingerprint Fingerprint
+	Signature   []byte
+}
+
 // Publisher is the receiving side of the protocol: it owns the current key and
 // serves the canonical manifest bytes at the well-known endpoint.
 type Publisher interface {
-	// CurrentManifest returns the prebuilt canonical bytes and their id for a
-	// hosted domain, or ok=false when the domain publishes no key. The bytes
-	// must be served verbatim — they are what the id was computed over.
-	CurrentManifest(domain string) (raw []byte, id ManifestID, expiresAt time.Time, ok bool)
+	// CurrentManifest returns the publication snapshot for a hosted domain, or
+	// ok=false when the domain publishes no key.
+	CurrentManifest(domain string) (pub Publication, ok bool)
 }

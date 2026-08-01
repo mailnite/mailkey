@@ -30,6 +30,7 @@ import (
 
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/manifest"
 )
 
@@ -101,43 +102,53 @@ func (t *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		t.miss(w)
 		return
 	}
-	raw, id, expires, ok := t.lookup(r.Host)
+	pub, ok := t.lookup(r.Host)
 	if !ok {
 		t.miss(w)
 		return
 	}
 
-	etag := `"` + manifest.EncodeID(id) + `"`
+	etag := `"` + manifest.EncodeID(pub.ID) + `"`
 	// A strong validator is honest here in a way it usually is not: the id IS the
 	// hash of the bytes being served, so equal etags cannot mean different bodies.
 	h := w.Header()
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(t.cacheSeconds(expires).Seconds())))
+	h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(t.cacheSeconds(pub.ExpiresAt).Seconds())))
 	h.Set("Content-Type", mailkey.MediaType)
 	h.Set("X-Content-Type-Options", "nosniff")
+	// The proof comes from the SAME snapshot as the body, which is the whole
+	// point of the snapshot: a proof is only ever valid against the exact bytes
+	// it signed, so a handler that fetched the two separately could pair one
+	// build's body with another's signature and every correspondent would see a
+	// verification failure.
+	identity.WriteProof(h, pub.Proof)
 
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
+		// The proof fields stay set on the 304. A cached body and a proof from a
+		// different response must never become associated, and since the etag IS
+		// the hash of the body, re-sending this snapshot's proof alongside its own
+		// validator is the only pairing that can result.
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	h.Set("Content-Length", strconv.Itoa(len(raw)))
+	h.Set("Content-Length", strconv.Itoa(len(pub.Raw)))
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	_, _ = w.Write(pub.Raw)
 }
 
 // lookup asks the publisher about each domain the host could mean, in the
 // protocol's order of authority.
-func (t *Handler) lookup(host string) ([]byte, mailkey.ManifestID, time.Time, bool) {
+func (t *Handler) lookup(host string) (mailkey.Publication, bool) {
 	for _, d := range discovery.DomainCandidatesOf(host) {
-		if raw, id, expires, ok := t.Publisher.CurrentManifest(d); ok && len(raw) > 0 {
-			return raw, id, expires, true
+		if pub, ok := t.Publisher.CurrentManifest(d); ok && len(pub.Raw) > 0 {
+			return pub, true
 		}
 	}
-	return nil, mailkey.ManifestID{}, time.Time{}, false
+	return mailkey.Publication{}, false
 }
 
 // cacheSeconds is the shorter of "until this manifest expires" and the cache

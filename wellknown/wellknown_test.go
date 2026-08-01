@@ -7,6 +7,7 @@
 package wellknown_test
 
 import (
+	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -15,29 +16,45 @@ import (
 	"time"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/manifest"
 	"github.com/mailnite/mailkey/wellknown"
 )
 
-// fakePublisher publishes for a fixed set of domains.
+// fakePublisher publishes for a fixed set of domains. signer, when set, signs
+// each publication so the handler's proof plumbing is exercised.
 type fakePublisher struct {
 	raw     map[string][]byte
 	expires time.Time
 	asked   []string
+	signer  ed25519.PrivateKey
 }
 
-func (f *fakePublisher) CurrentManifest(domain string) ([]byte, mailkey.ManifestID, time.Time, bool) {
+func (f *fakePublisher) CurrentManifest(domain string) (mailkey.Publication, bool) {
 	f.asked = append(f.asked, domain)
 	raw, ok := f.raw[domain]
 	if !ok {
-		return nil, mailkey.ManifestID{}, time.Time{}, false
+		return mailkey.Publication{}, false
 	}
-	return raw, manifest.ManifestIDOf(raw), f.expires, true
+	out := mailkey.Publication{Raw: raw, ID: manifest.ManifestIDOf(raw), ExpiresAt: f.expires}
+	if f.signer != nil {
+		pk := f.signer.Public().(ed25519.PublicKey)
+		fp, err := identity.FingerprintOf(domain, pk)
+		if err != nil {
+			return mailkey.Publication{}, false
+		}
+		sig, err := identity.SignManifest(f.signer, domain, raw)
+		if err != nil {
+			return mailkey.Publication{}, false
+		}
+		out.Proof = &mailkey.Proof{PublicKey: pk, Fingerprint: fp, Signature: sig}
+	}
+	return out, true
 }
 
 func (f *fakePublisher) ManifestIDFor(domain string) (mailkey.ManifestID, bool) {
-	_, id, _, ok := f.CurrentManifest(domain)
-	return id, ok
+	pub, ok := f.CurrentManifest(domain)
+	return pub.ID, ok
 }
 
 func newFixture(t *testing.T, domains ...string) (*wellknown.Handler, *fakePublisher) {
@@ -261,5 +278,92 @@ func TestMediaTypeIsGenericMessagePack(t *testing.T) {
 	}
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatal("a binary response must be served nosniff")
+	}
+}
+
+/*
+TestProofFieldsTravelWithTheBody: a signed publication puts its three proof
+fields on the response, and they are the ones that authenticate THAT body.
+
+The pairing is the whole property. A handler that looked up the manifest and the
+current identity separately could serve one build's bytes beside another's
+signature, and since the proof is detached there is nothing in the body to
+notice — every correspondent would simply see a verification failure and, for a
+pinned domain, read it as an attack.
+*/
+func TestProofFieldsTravelWithTheBody(t *testing.T) {
+	h, pub := newFixture(t, "x.test")
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub.signer = priv
+
+	w := get(h, "GET", "mail.x.test", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	proof, found, err := identity.ReadProof(w.Header())
+	if err != nil || !found {
+		t.Fatalf("proof fields: found=%v err=%v", found, err)
+	}
+	if err := identity.Check(proof, "x.test", w.Body.Bytes()); err != nil {
+		t.Fatalf("the served proof does not authenticate the served body: %v", err)
+	}
+	// The signer names the domain the request was FOR, not the host it arrived
+	// on: a fingerprint computed over "mail.x.test" would never match the pin a
+	// correspondent holds for x.test.
+	if _, err := identity.FingerprintOf("mail.x.test", proof.PublicKey); err == nil {
+		if err := identity.Check(proof, "mail.x.test", w.Body.Bytes()); err == nil {
+			t.Fatal("the proof verified under the authority host rather than the domain")
+		}
+	}
+}
+
+// TestUnsignedPublicationCarriesNoProofFields: a domain without an identity key
+// serves a manifest and NO proof fields. Not a subset, not empty values — a
+// partial proof is malformed, and a client is required to treat it as an attack.
+func TestUnsignedPublicationCarriesNoProofFields(t *testing.T) {
+	h, _ := newFixture(t, "x.test")
+	w := get(h, "GET", "mail.x.test", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	for _, name := range []string{mailkey.HeaderIdentity, mailkey.HeaderSigner, mailkey.HeaderSignature} {
+		if v := w.Header().Get(name); v != "" {
+			t.Fatalf("unsigned publication set %s = %q", name, v)
+		}
+	}
+	if _, found, err := identity.ReadProof(w.Header()); err != nil || found {
+		t.Fatalf("an unsigned response must read as absent, not malformed: found=%v err=%v", found, err)
+	}
+}
+
+// TestNotModifiedKeepsItsOwnProof: a 304 must not let a cached body become
+// associated with another response's proof. The etag IS the hash of the body, so
+// re-sending this publication's own proof alongside its own validator is the only
+// pairing a client can end up with.
+func TestNotModifiedKeepsItsOwnProof(t *testing.T) {
+	h, pub := newFixture(t, "x.test")
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub.signer = priv
+
+	first := get(h, "GET", "mail.x.test", nil)
+	etag := first.Header().Get("ETag")
+	body := first.Body.Bytes()
+
+	second := get(h, "GET", "mail.x.test", map[string]string{"If-None-Match": etag})
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status %d, want 304", second.Code)
+	}
+	proof, found, err := identity.ReadProof(second.Header())
+	if err != nil || !found {
+		t.Fatalf("a 304 must still carry the proof for the body it validates: found=%v err=%v", found, err)
+	}
+	if err := identity.Check(proof, "x.test", body); err != nil {
+		t.Fatalf("the 304's proof does not authenticate the cached body: %v", err)
 	}
 }
