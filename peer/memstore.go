@@ -280,3 +280,16 @@ func (s *MemStore) SetIdentity(_ context.Context, domain string, st mailkey.Iden
 	p.Identity = st
 	return nil
 }
+
+// ListCapabilities returns every latched domain. Copies out, like every other
+// read: a caller holding a map into the store could otherwise clear a latch by
+// mutating what it was shown.
+func (s *MemStore) ListCapabilities(context.Context) (map[string]mailkey.Capability, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]mailkey.Capability, len(s.caps))
+	for d, c := range s.caps {
+		out[d] = c
+	}
+	return out, nil
+}

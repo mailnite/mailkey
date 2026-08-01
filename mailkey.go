@@ -495,6 +495,14 @@ type Store interface {
 	// Capability reads the domain's transport latch. A domain never seen returns
 	// the zero value, which requires nothing.
 	Capability(ctx context.Context, domain string) (Capability, error)
+	// ListCapabilities enumerates every domain carrying a latch, keyed by domain.
+	//
+	// Needed because a latch can outlive its peer record: Forget drops the cache
+	// and the domain vanishes from ListPeers, while the requirement to encrypt
+	// it survives — by design. Without this, an operator would be unable to see
+	// or lift a requirement that is holding their mail, which turns the
+	// protection into a trap.
+	ListCapabilities(ctx context.Context) (map[string]Capability, error)
 	// MarkValidated records a successful HTTPS authority fetch. Idempotent, and
 	// called on EVERY success rather than only the first: the latch is set once,
 	// but LastValidatedAt answers "when did this domain last actually work",
