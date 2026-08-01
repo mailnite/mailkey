@@ -246,3 +246,37 @@ func (s *MemStore) SetMKDP1Disabled(_ context.Context, domain string, disabled b
 	s.caps[d] = c
 	return nil
 }
+
+// PutPeerForTest replaces a peer record wholesale. It exists so a test can put
+// the store into a state the protocol paths cannot produce — a truncated
+// manifest, a partial write, a restored backup — because those are exactly the
+// states an attacker arranges and they must not end in plaintext.
+func (s *MemStore) PutPeerForTest(_ context.Context, p *mailkey.Peer) error {
+	d, err := discovery.Normalize(p.Domain)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peers[d] = clonePeer(p)
+	return nil
+}
+
+// SetIdentity persists the pin and its observations. It creates a record for a
+// domain not yet known: a trust decision may be reached on the first fetch,
+// before any observation made the peer durable.
+func (s *MemStore) SetIdentity(_ context.Context, domain string, st mailkey.IdentityState) error {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.peers[d]
+	if !ok {
+		p = &mailkey.Peer{Domain: d, State: mailkey.StateDiscovered}
+		s.peers[d] = p
+	}
+	p.Identity = st
+	return nil
+}

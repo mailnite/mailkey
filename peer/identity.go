@@ -227,8 +227,14 @@ func checkReplay(cur mailkey.IdentityState, res mailkey.Result) (Verdict, bool) 
 			Reason: "replay/rollback",
 		}, true
 	case issued.Equal(cur.LastVerifiedIssuedAt) && res.ManifestID != cur.LastVerifiedManifestID:
+		// An ALERT, not a refusal — §6.4 is deliberate about the difference.
+		// Two manifests stamped the same second is what a publisher building
+		// twice on a cold cache produces, and refusing would make an authority
+		// with a clock-granularity bug undeliverable rather than noisy. MKDP1
+		// reports instability for a human; it does not tie-break, and it does
+		// not punish.
 		return Verdict{
-			Encrypt: false, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
+			Encrypt: true, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
 			Status: cur.Status,
 			Alert:  "the authority served two different manifests carrying the same issue time — the authority is unstable",
 			Reason: "replay/same-issued-different-id",

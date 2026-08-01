@@ -8,6 +8,7 @@ package peer
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -341,31 +342,15 @@ func (s *Service) refresh(ctx context.Context, d string) (mailkey.Peer, error) {
 // so a transient failure cannot silently downgrade a domain that has been
 // encrypted before.
 func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mailkey.Result, error) {
+	// Normalization is the one failure that stays outside the policy wrapper: a
+	// domain we cannot even parse has no peer, no latch and no protection to
+	// lose, and holding mail for it would turn a malformed address into stuck
+	// mail rather than a bounce.
 	d, err := discovery.Normalize(domain)
 	if err != nil {
 		return mailkey.Result{}, err
 	}
-	p, err := s.store.GetPeer(ctx, d)
-	if err != nil {
-		return mailkey.Result{}, err
-	}
-	if p != nil && p.Policy == mailkey.PolicyDisabled {
-		return mailkey.Result{}, mailkey.ErrDisabled
-	}
-	now := s.now()
-	if rec, ok := Usable(p, now); ok {
-		if need, _ := NeedsRefresh(p, now); !need {
-			// The common case: a valid cached manifest, no network at all.
-			return s.fromCache(ctx, p, rec, d)
-		}
-		// Due for refresh but still usable: try, and fall back to the cache if
-		// the authority is unreachable. A working key beats a fresh error.
-		if res, rerr := s.resolve(ctx, d, false); rerr == nil {
-			return res, nil
-		}
-		return s.fromCache(ctx, p, rec, d)
-	}
-	res, rerr := s.resolve(ctx, d, false)
+	res, p, rerr := s.resolveForEncryption(ctx, d)
 	if rerr != nil {
 		return mailkey.Result{}, s.policyFailure(ctx, p, d, rerr)
 	}
@@ -373,22 +358,53 @@ func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mail
 }
 
 /*
-fromCache serves a stored manifest, re-parsing its canonical bytes rather than
-trusting a decoded copy.
+resolveForEncryption is the whole decision, and it is unexported for a reason
+that is structural rather than stylistic: it has NO path to the caller.
 
-The re-parse can fail — a truncated record, a partial write, a restored backup —
-and that failure has to go through policyFailure like any other. Returning it
-raw would be the SAME downgrade this file exists to prevent, reached through a
-different door: the outbound adapter reads any bare error as "no key available"
-and sends in the clear, so a corrupted cache would quietly undo the protection a
-successful fetch established.
+Every error it produces goes through policyFailure above, because that is the
+only way out. That property is what this shape buys, and it was bought the hard
+way — the previous version returned from six places, three of which skipped
+policy entirely (a store read that failed, a cached manifest whose canonical
+bytes would not re-parse, and the refresh fallback). Each looked correct in
+isolation, and each was a silent downgrade to plaintext, because the layers above
+map any unrecognised error to "no key available" and send in the clear.
+
+Enumerating those exits does not scale — the next edit adds a seventh. Making
+them impossible does. A new error path added inside this function is
+policy-checked automatically, whether or not whoever adds it has read this
+comment.
 */
-func (s *Service) fromCache(ctx context.Context, p *mailkey.Peer, rec mailkey.ManifestRecord, domain string) (mailkey.Result, error) {
-	res, err := resultOf(rec, p.Domain)
+func (s *Service) resolveForEncryption(ctx context.Context, d string) (mailkey.Result, *mailkey.Peer, error) {
+	p, err := s.store.GetPeer(ctx, d)
 	if err != nil {
-		return mailkey.Result{}, s.policyFailure(ctx, p, domain, err)
+		// A store that cannot answer is not evidence that this domain does not
+		// encrypt. Passed to policy, which fails closed when it cannot read the
+		// latch either.
+		return mailkey.Result{}, nil, err
 	}
-	return res, nil
+	if p != nil && p.Policy == mailkey.PolicyDisabled {
+		// An administrator's decision, not a failure. policyFailure lets
+		// ErrDisabled through untouched, so this remains the one deliberate
+		// route to cleartext for a known peer.
+		return mailkey.Result{}, p, mailkey.ErrDisabled
+	}
+	now := s.now()
+	if rec, ok := Usable(p, now); ok {
+		if need, _ := NeedsRefresh(p, now); !need {
+			// The common case: a valid cached manifest, no network at all.
+			res, cerr := resultOf(rec, p.Domain)
+			return res, p, cerr
+		}
+		// Due for refresh but still usable: try, and fall back to the cache if
+		// the authority is unreachable. A working key beats a fresh error.
+		if res, rerr := s.resolve(ctx, d, false); rerr == nil {
+			return res, p, nil
+		}
+		res, cerr := resultOf(rec, p.Domain)
+		return res, p, cerr
+	}
+	res, rerr := s.resolve(ctx, d, false)
+	return res, p, rerr
 }
 
 /*
@@ -414,6 +430,12 @@ blip indistinguishable from a domain that never spoke MKDP1, which is the exact
 substitution this function exists to prevent.
 */
 func (s *Service) policyFailure(ctx context.Context, p *mailkey.Peer, domain string, cause error) error {
+	// An administrator's explicit disable is an answer, not a failure: it is the
+	// one route to cleartext for a known peer, and wrapping it would make the
+	// setting unusable.
+	if errors.Is(cause, mailkey.ErrDisabled) {
+		return cause
+	}
 	if p != nil && p.Policy == mailkey.PolicyRequire {
 		return mailkey.FailRequired(domain, cause)
 	}
@@ -460,18 +482,40 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 		}
 		return mailkey.Result{}, err
 	}
-	if err := s.store.InstallManifest(ctx, d, res); err != nil {
-		return mailkey.Result{}, err
+	/*
+		The trust decision comes BEFORE the manifest is allowed to become cached
+		state, and the order is the security property.
+
+		Install first and a refused manifest is in the cache; the very next send
+		finds it Usable, serves it without another fetch, and the decision that
+		refused it is never consulted again. The check would then protect only
+		the first message after a takeover.
+
+		So: decide, record what we learned either way, and install only what we
+		accepted.
+	*/
+	prev, _ := s.store.GetPeer(ctx, d)
+	verdict := s.decide(prev, res)
+	if err := s.store.SetIdentity(ctx, d, ApplyIdentity(identityOf(prev), verdict, res, s.now())); err != nil && s.onError != nil {
+		s.onError(d, xerrors.Errorf("identity state: %w", err))
 	}
-	// The domain answered. From here on it may never silently receive plaintext,
-	// whatever happens to this manifest or to a later refresh.
-	//
-	// Recorded AFTER the manifest is installed, so a store that failed to keep
-	// the key does not also claim we are committed to encrypting to it: the
-	// latch would then require encryption for a domain we hold nothing for, and
-	// every message to it would hold forever.
+	// The domain answered over HTTPS. Latched even when the identity is refused:
+	// the claim is about the transport, and a refusal must never become the
+	// reason a later outage sends plaintext.
 	if err := s.store.MarkValidated(ctx, d, res.FetchedAt); err != nil && s.onError != nil {
 		s.onError(d, xerrors.Errorf("capability latch: %w", err))
+	}
+	if !verdict.Encrypt {
+		if ferr := s.store.RecordFailure(ctx, d, xerrors.New(verdict.Alert)); ferr != nil && s.onError != nil {
+			s.onError(d, ferr)
+		}
+		if s.onError != nil {
+			s.onError(d, xerrors.Errorf("identity refused (%s): %s", verdict.Reason, verdict.Alert))
+		}
+		return mailkey.Result{}, mailkey.FailRequired(d, xerrors.New(verdict.Alert))
+	}
+	if err := s.store.InstallManifest(ctx, d, res); err != nil {
+		return mailkey.Result{}, err
 	}
 	return res, nil
 }
@@ -492,4 +536,23 @@ func resultOf(rec mailkey.ManifestRecord, domain string) (mailkey.Result, error)
 		ExpiresAt:  rec.ExpiresAt,
 		TLSHost:    rec.AuthorityHost,
 	}, nil
+}
+
+// decide applies the §6.2 matrix to a fresh fetch, reading the DNS corroboration
+// and the cache state from the peer we already hold.
+func (s *Service) decide(p *mailkey.Peer, res mailkey.Result) Verdict {
+	var dnsFP mailkey.Fingerprint
+	var hasDNS, cachedUsable bool
+	if p != nil {
+		dnsFP, hasDNS = p.Identity.DNSFingerprint, p.Identity.HasDNSFP
+		_, cachedUsable = Usable(p, s.now())
+	}
+	return DecideIdentity(p, res, dnsFP, hasDNS, cachedUsable)
+}
+
+func identityOf(p *mailkey.Peer) mailkey.IdentityState {
+	if p == nil {
+		return mailkey.IdentityState{}
+	}
+	return p.Identity
 }

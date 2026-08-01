@@ -485,6 +485,13 @@ type Store interface {
 	// the first hands an operator a downgrade every time they tidy up.
 	ForgetPeer(ctx context.Context, domain string) error
 
+	// SetIdentity persists a domain's long-term trust state — the pin and what
+	// has been observed about it. Separate from InstallManifest because a
+	// verdict is reached BEFORE a manifest is allowed to become cached state:
+	// installing first would let a refused manifest be served from cache on the
+	// next send, bypassing the decision entirely.
+	SetIdentity(ctx context.Context, domain string, state IdentityState) error
+
 	// Capability reads the domain's transport latch. A domain never seen returns
 	// the zero value, which requires nothing.
 	Capability(ctx context.Context, domain string) (Capability, error)

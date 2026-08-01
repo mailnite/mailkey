@@ -237,3 +237,71 @@ type brokenCapStore struct{ mailkey.Store }
 func (brokenCapStore) Capability(context.Context, string) (mailkey.Capability, error) {
 	return mailkey.Capability{}, errors.New("store unavailable")
 }
+
+/*
+TestEveryFailurePathHoldsALatchedPeer is the guard that replaces enumeration.
+
+The protection depends on one sentinel, `ErrEncryptionRequired`, surviving from
+`ResolveForEncryption` all the way to the queue — because every layer above
+defaults to cleartext: the adapter maps unrecognised errors to "no key", and the
+queue logs "no key" and sends in the clear. So an error that escapes without
+policy applied IS a downgrade, silently, at three removes from where it was
+written.
+
+That is why `resolveForEncryption` has no path to the caller. This test is the
+behavioural half of the same guarantee: it fails the operation at each stage in
+turn and requires the same answer every time. A future edit that introduces a
+new early return has to break this to ship.
+
+The failure modes here are deliberately mundane — a store that cannot read, a
+manifest whose bytes will not parse, an authority that is unreachable. None of
+them is an attack by itself. They are the states an attacker ARRANGES, because
+each one used to end in plaintext.
+*/
+func TestEveryFailurePathHoldsALatchedPeer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1750000000, 0).UTC()
+
+	for name, corrupt := range map[string]func(*peer.MemStore, *flakyResolver, *clock){
+		"the authority is unreachable and the cache has lapsed": func(_ *peer.MemStore, r *flakyResolver, c *clock) {
+			c.t = now.Add(2 * time.Hour)
+			r.fail = true
+		},
+		"the cached manifest will not re-parse": func(s *peer.MemStore, r *flakyResolver, c *clock) {
+			r.fail = true
+			corruptCache(t, s, "example.com")
+		},
+		"the peer store cannot be read": func(s *peer.MemStore, r *flakyResolver, c *clock) {
+			r.fail = true
+			c.t = now.Add(2 * time.Hour)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, store, r, clk := capEnv(t, now.Add(time.Hour))
+			// Establish the peer: validated, latched, encrypting normally.
+			if _, err := svc.ResolveForEncryption(ctx, "example.com"); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			corrupt(store, r, clk)
+
+			_, err := svc.ResolveForEncryption(ctx, "example.com")
+			if !errors.Is(err, mailkey.ErrEncryptionRequired) {
+				t.Fatalf("returned %v — the queue reads that as \"no key\" and sends this in the clear", err)
+			}
+		})
+	}
+}
+
+// corruptCache replaces a peer's stored canonical bytes with something that
+// cannot be parsed — a truncated record, a partial write, a restored backup.
+func corruptCache(t *testing.T, s *peer.MemStore, domain string) {
+	t.Helper()
+	p, err := s.GetPeer(context.Background(), domain)
+	if err != nil || p == nil || p.Effective == nil {
+		t.Fatalf("no cached manifest to corrupt: %v", err)
+	}
+	p.Effective.CanonicalBytes = []byte("not a manifest")
+	if err := s.PutPeerForTest(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+}

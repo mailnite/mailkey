@@ -280,9 +280,16 @@ func TestReplayProtection(t *testing.T) {
 	// one instant. MKDP1 reports rather than tie-breaks.
 	twin := result(t, dom, now, 1)
 	twin.ManifestID = mailkey.ManifestID{9, 9, 9}
+	// Reported, not refused: §6.4 calls this an alert. Refusing would make an
+	// authority whose clock granularity produced two manifests in one second
+	// undeliverable, and MKDP1's answer to ambiguity is to surface it for a
+	// human rather than to invent a tie-break or to punish.
 	v = peer.DecideIdentity(p, twin, mailkey.Fingerprint{}, false, true)
-	if v.Encrypt || v.Reason != "replay/same-issued-different-id" {
-		t.Fatalf("an unstable authority was accepted: %+v", v)
+	if v.Reason != "replay/same-issued-different-id" || v.Alert == "" {
+		t.Fatalf("an unstable authority was not reported: %+v", v)
+	}
+	if !v.Encrypt {
+		t.Fatal("instability is an alert, not a refusal — this would strand mail on a publisher bug")
 	}
 
 	// An already-expired manifest can never authorize new encryption, whoever
