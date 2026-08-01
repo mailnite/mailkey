@@ -29,7 +29,12 @@ import (
 type MemStore struct {
 	mu    sync.Mutex
 	peers map[string]*mailkey.Peer
-	now   func() time.Time
+	// caps is kept in its OWN map, not as a field of Peer, so that deleting a
+	// peer cannot delete the latch by accident. The separation is the guarantee:
+	// ForgetPeer touches peers and nothing else, and no future edit to the peer
+	// record can quietly take the downgrade protection with it.
+	caps map[string]mailkey.Capability
+	now  func() time.Time
 }
 
 var _ mailkey.Store = (*MemStore)(nil)
@@ -187,4 +192,57 @@ func clonePeer(p *mailkey.Peer) *mailkey.Peer {
 		cp.Observations = append([]mailkey.Observation(nil), p.Observations...)
 	}
 	return &cp
+}
+
+// --- capability latch ---------------------------------------------------------
+
+func (s *MemStore) Capability(_ context.Context, domain string) (mailkey.Capability, error) {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return mailkey.Capability{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.caps[d], nil
+}
+
+func (s *MemStore) MarkValidated(_ context.Context, domain string, at time.Time) error {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.caps == nil {
+		s.caps = map[string]mailkey.Capability{}
+	}
+	c := s.caps[d]
+	if !c.EverValidated {
+		c.EverValidated, c.FirstValidatedAt = true, at
+	}
+	c.LastValidatedAt = at
+	// A successful fetch does NOT lift an administrator's downgrade. The latch
+	// records capability; Disabled records a decision, and only the operator who
+	// made it may reverse it.
+	s.caps[d] = c
+	return nil
+}
+
+func (s *MemStore) SetMKDP1Disabled(_ context.Context, domain string, disabled bool, reason string, at time.Time) error {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.caps == nil {
+		s.caps = map[string]mailkey.Capability{}
+	}
+	c := s.caps[d]
+	c.Disabled, c.DisabledAt, c.Reason = disabled, at, reason
+	if !disabled {
+		c.DisabledAt, c.Reason = time.Time{}, ""
+	}
+	s.caps[d] = c
+	return nil
 }

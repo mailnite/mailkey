@@ -356,32 +356,69 @@ func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mail
 	if rec, ok := Usable(p, now); ok {
 		if need, _ := NeedsRefresh(p, now); !need {
 			// The common case: a valid cached manifest, no network at all.
-			return resultOf(rec, p.Domain)
+			return s.fromCache(ctx, p, rec, d)
 		}
 		// Due for refresh but still usable: try, and fall back to the cache if
 		// the authority is unreachable. A working key beats a fresh error.
 		if res, rerr := s.resolve(ctx, d, false); rerr == nil {
 			return res, nil
 		}
-		return resultOf(rec, p.Domain)
+		return s.fromCache(ctx, p, rec, d)
 	}
 	res, rerr := s.resolve(ctx, d, false)
 	if rerr != nil {
-		return mailkey.Result{}, s.policyFailure(p, d, rerr)
+		return mailkey.Result{}, s.policyFailure(ctx, p, d, rerr)
 	}
 	return res, nil
 }
 
-// policyFailure applies the peer's policy to a discovery failure. Under
-// PolicyRequire the caller must be told that plaintext is not an option, and it
-// must be told in a way that cannot be mistaken for a permanent rejection — see
-// mailkey.ErrEncryptionRequired.
-//
-// Under the automatic policy the failure passes through unchanged: the caller
-// then decides, and for ordinary mail that decision is cleartext, exactly as it
-// was before this protocol existed.
-func (s *Service) policyFailure(p *mailkey.Peer, domain string, cause error) error {
+/*
+fromCache serves a stored manifest, re-parsing its canonical bytes rather than
+trusting a decoded copy.
+
+The re-parse can fail — a truncated record, a partial write, a restored backup —
+and that failure has to go through policyFailure like any other. Returning it
+raw would be the SAME downgrade this file exists to prevent, reached through a
+different door: the outbound adapter reads any bare error as "no key available"
+and sends in the clear, so a corrupted cache would quietly undo the protection a
+successful fetch established.
+*/
+func (s *Service) fromCache(ctx context.Context, p *mailkey.Peer, rec mailkey.ManifestRecord, domain string) (mailkey.Result, error) {
+	res, err := resultOf(rec, p.Domain)
+	if err != nil {
+		return mailkey.Result{}, s.policyFailure(ctx, p, domain, err)
+	}
+	return res, nil
+}
+
+/*
+policyFailure decides whether "no usable key" may become plaintext.
+
+Two things can forbid it, and they are deliberately separate:
+
+  - an administrator asked for encryption to be REQUIRED (PolicyRequire);
+  - the domain has already answered over HTTPS at least once, so we KNOW it
+    speaks MKDP1 (the capability latch).
+
+The second is the one that closes the silent downgrade. Without it, only
+explicitly configured domains are protected, and every automatically discovered
+peer — the overwhelming majority — returns to plaintext as soon as its cached
+manifest expires and a refresh fails. That is not a hypothetical: an attacker who
+can disrupt DNS or the HTTPS path only has to wait for the cache to lapse, and
+nothing anywhere reports that the mail went out in the clear. 01-PRD FR-7 and
+04-SECURITY §7 forbid it, and this function is where the prohibition lives.
+
+A failure to READ the latch is treated as "the latch is set". The alternative —
+falling through to plaintext when the store is unavailable — would make a storage
+blip indistinguishable from a domain that never spoke MKDP1, which is the exact
+substitution this function exists to prevent.
+*/
+func (s *Service) policyFailure(ctx context.Context, p *mailkey.Peer, domain string, cause error) error {
 	if p != nil && p.Policy == mailkey.PolicyRequire {
+		return mailkey.FailRequired(domain, cause)
+	}
+	cap, err := s.store.Capability(ctx, domain)
+	if err != nil || cap.Requires() {
 		return mailkey.FailRequired(domain, cause)
 	}
 	return cause
@@ -425,6 +462,16 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 	}
 	if err := s.store.InstallManifest(ctx, d, res); err != nil {
 		return mailkey.Result{}, err
+	}
+	// The domain answered. From here on it may never silently receive plaintext,
+	// whatever happens to this manifest or to a later refresh.
+	//
+	// Recorded AFTER the manifest is installed, so a store that failed to keep
+	// the key does not also claim we are committed to encrypting to it: the
+	// latch would then require encryption for a domain we hold nothing for, and
+	// every message to it would hold forever.
+	if err := s.store.MarkValidated(ctx, d, res.FetchedAt); err != nil && s.onError != nil {
+		s.onError(d, xerrors.Errorf("capability latch: %w", err))
 	}
 	return res, nil
 }

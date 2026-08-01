@@ -417,6 +417,46 @@ const (
 	IdentityContested IdentityStatus = "contested"
 )
 
+/*
+Capability is what this sender knows about a domain's TRANSPORT: that it has, at
+least once, answered a successful HTTPS authority fetch.
+
+It is deliberately NOT part of Peer, and that separation is the point rather than
+tidiness. Peer holds cached manifests and observations — things a sender should
+be able to discard freely, because discarding them costs one fetch. This costs
+something entirely different: once a domain is known to speak MKDP1, sending it
+plaintext because a refresh failed is a downgrade an attacker can cause on
+demand, by letting a cached manifest expire and then disrupting the refresh.
+01-PRD FR-7 and 04-SECURITY §7 forbid exactly that.
+
+So the latch outlives the cache. "Forget this peer" means "drop what I cached,
+rediscover it" and MUST leave this untouched. Only an explicit administrator
+decision — recorded here as Disabled — may re-permit plaintext, because that
+decision has a consequence no cache-hygiene operation should be able to carry
+silently.
+
+It is also independent of the identity extension. A domain that publishes no
+signature at all still sets this on its first successful fetch: the claim is
+about the transport, not about who signed anything.
+*/
+type Capability struct {
+	// EverValidated never returns to false except through Disabled.
+	EverValidated    bool
+	FirstValidatedAt time.Time
+	LastValidatedAt  time.Time
+	// Disabled is the explicit administrator downgrade: stop requiring MKDP1 for
+	// this domain. The ONLY thing that lifts the latch.
+	Disabled   bool
+	DisabledAt time.Time
+	// Reason is the administrator's note for the downgrade, kept so the decision
+	// is reviewable long after whoever made it has moved on.
+	Reason string
+}
+
+// Requires reports whether this domain must not receive plaintext: it has been
+// validated, and no administrator has decided otherwise.
+func (c Capability) Requires() bool { return c.EverValidated && !c.Disabled }
+
 // Store is the persistence seam. Implementations may use any database; the
 // protocol requires only that InstallManifest is atomic.
 type Store interface {
@@ -438,7 +478,26 @@ type Store interface {
 	SetPolicy(ctx context.Context, domain string, p Policy) error
 	// ForgetPeer deletes cached manifests and observations. It is not a
 	// blocklist: the domain may be rediscovered later.
+	//
+	// It MUST NOT clear the Capability latch. "Forget what I cached" and "stop
+	// requiring encryption for this domain" are different decisions with
+	// different consequences, and an implementation that folds the second into
+	// the first hands an operator a downgrade every time they tidy up.
 	ForgetPeer(ctx context.Context, domain string) error
+
+	// Capability reads the domain's transport latch. A domain never seen returns
+	// the zero value, which requires nothing.
+	Capability(ctx context.Context, domain string) (Capability, error)
+	// MarkValidated records a successful HTTPS authority fetch. Idempotent, and
+	// called on EVERY success rather than only the first: the latch is set once,
+	// but LastValidatedAt answers "when did this domain last actually work",
+	// which is what an operator needs when deciding whether a refusal is an
+	// attack or an outage.
+	MarkValidated(ctx context.Context, domain string, at time.Time) error
+	// SetMKDP1Disabled is the explicit administrator downgrade — the only
+	// operation that lifts the latch. Separate from SetPolicy because policy
+	// tightens and this loosens, and the two must not share a control.
+	SetMKDP1Disabled(ctx context.Context, domain string, disabled bool, reason string, at time.Time) error
 }
 
 // Service is the protocol's application-facing behavior: observations in,
