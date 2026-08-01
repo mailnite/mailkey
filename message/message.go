@@ -53,18 +53,21 @@ var RoutingHeaders = []string{"From", "To", "Cc", "Date", "Message-Id", "MIME-Ve
 Seal wraps an entire RFC 5322 message as an MKDP1 message, sealed to a validated
 manifest.
 
-An already-sealed message is returned unchanged, so re-delivery and per-recipient
-fan-out never double-seal — a property the caller would otherwise have to
-remember at every call site.
+Seal ALWAYS seals. It once returned an already-marked message unchanged, as a
+convenience against double-sealing — and that convenience was a bypass: the
+marks it trusted are two ordinary headers, so anything that could put bytes into
+an outbound message (an authenticated submission client, a compromised account,
+an internal application) could write them onto plaintext and have the sealing
+step hand that plaintext straight back. The sender was then told the message
+left protected. Headers are not authentication; only opening an envelope is.
+A caller that must not double-seal decides that from state it controls, never
+from the message.
 
 Sealing takes a validated mailkey.Result rather than a bare public key on
 purpose: the identifiers the envelope authenticates (domain, kid, manifest id)
 come from the discovery that authorised the key, so they cannot drift from it.
 */
 func Seal(r mailkey.Result, raw []byte) ([]byte, error) {
-	if IsEncrypted(raw) {
-		return raw, nil
-	}
 	env, err := envelope.Seal(r, raw)
 	if err != nil {
 		return nil, err
@@ -90,12 +93,66 @@ func Seal(r mailkey.Result, raw []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// IsEncrypted reports whether raw is an MKDP1-sealed message. Both fields are
-// required: the protocol marker says what sealed it, and the suite says which
-// parser opens it, so the reader never has to infer a format by trying one.
+/*
+IsEncrypted reports whether raw is FRAMED as an MKDP1 message: both markers
+present, the protocol version and the suite the reader would parse with.
+
+It is a routing hint for a RECEIVER — "try to read this as MKDP1" — and nothing
+more. It proves nothing: the markers are unauthenticated headers, so a message
+can carry them over any bytes at all. Never use it to conclude that a message
+IS protected; that answer only comes from opening the envelope (EnvelopeOf,
+Open), which authenticates what it parses.
+*/
 func IsEncrypted(raw []byte) bool {
 	return HeaderValue(raw, mailkey.HeaderEncrypted) == mailkey.Version &&
 		HeaderValue(raw, mailkey.HeaderSuite) == envelope.SuiteX25519HKDFSHA256AES256GCM
+}
+
+/*
+ReservedHeaders are the protocol's own headers. A message SUBMITTED to a server
+for sending must never arrive carrying them: Mail-Key-Encrypted and
+Mail-Key-Suite describe a sealing that only the sending server can perform, and
+Mail-Key advertises the sending domain's manifest, which only that server can
+truthfully stamp. A submission that carries any of them is either confused or
+forging, and in both cases the server\'s own value is the only correct one.
+*/
+var ReservedHeaders = []string{mailkey.HeaderEncrypted, mailkey.HeaderSuite, mailkey.HeaderName}
+
+// HasReserved reports whether raw carries any protocol-reserved header — the
+// check a submission API makes before accepting a caller-supplied message.
+func HasReserved(raw []byte) bool {
+	for _, name := range ReservedHeaders {
+		if HeaderValue(raw, name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// StripReserved removes every protocol-reserved header from raw. A server
+// applies it at the submission boundary so that whatever it later stamps or
+// seals is the only such header on the wire.
+func StripReserved(raw []byte) []byte {
+	for _, name := range ReservedHeaders {
+		raw = RemoveHeader(raw, name)
+	}
+	return raw
+}
+
+/*
+IsSealed reports whether raw actually CARRIES an MKDP1 envelope — framed as one
+AND parsing as one.
+
+This is the proof-shaped question, and the one to ask wherever a claim of
+protection is recorded or shown to a person. IsEncrypted only reads two
+headers, which anyone can write; passing that test means "try to read this as
+MKDP1", never "this was protected". Forging THIS one requires producing a real
+envelope, and an envelope that was never sealed to the reader is one they
+cannot open — so it can never dress up readable plaintext as protected mail.
+*/
+func IsSealed(raw []byte) bool {
+	_, err := EnvelopeOf(raw)
+	return err == nil
 }
 
 // EnvelopeOf parses the envelope out of a sealed message WITHOUT decrypting it —

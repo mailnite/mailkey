@@ -246,6 +246,7 @@ reason the retention floor must not become an unbounded archive.
 | F-14 | Medium | The blob store (`mailnite/pkg/blob`) used nil AAD, and chunk/object files are plain files OUTSIDE the encrypted key-value store — so a writer without the key could splice one sealed entry over another's location and the read would return the wrong message's content | Entries bind their location (`chunk\|<id>\|<offset>`, `object\|<id>`); the seal moved inside the write lock so the location is known first |
 | F-15 | Medium | DKIM signing keys (`mailcore/queue`) are sealed under one host wrap key with a CONSTANT as associated data, while key files are per-domain (`<domain>.key`) — so a sealed file could be copied into another domain's slot and would open there. The server would then sign that domain's mail with the wrong key, and every signature would fail against the DKIM record the domain publishes: silent, total deliverability loss that looks like a DNS problem. Found by the exhaustive AEAD sweep below, not by the MKDP1 work | Sealed files bind their domain (`MAILNITE-SEALED-KEY.v2\|<domain>`); v1 files are refused with an actionable message rather than opened, since their bytes carry no domain at all |
 | F-16 | Medium | The ENVELOPE parser validated the field set but not the encoding, so a reordered or non-minimal MessagePack map decoded to the same envelope. Because the associated data is computed from the PARSED FIELDS, two encodings of one envelope authenticate identically — the bytes on the wire were not pinned by the tag meant to protect them, and anything downstream that hashes, deduplicates or stores those bytes would see two messages where the protocol sees one. Found by the fuzz target written for the interoperability gate, whose property the test plan already required ("accepted input always repacks to identical bytes") | `envelope.Unmarshal` repacks and requires byte-identical input, the same check `manifest.ParseCanonical` has always applied. One encoding of an object is accepted, so there is nothing to disagree about |
+| F-17 | **Critical** | `message.Seal` returned a message UNCHANGED when two ordinary headers (`Mail-Key-Encrypted`, `Mail-Key-Suite`) were present — no envelope parsed, nothing authenticated. Anything able to put bytes into an outbound message (an authenticated submission client, a compromised account, an internal application) could stamp plaintext with them and have the sealing step hand that plaintext back, while the sender was shown "Protected by MailKey". The same header trust decided the INBOUND badge, so a remote could dress up readable plaintext as protected mail. Reported externally as C-01 | Seal always seals — the idempotency it offered was never authentication. `IsEncrypted` is documented as a routing hint only; the new `IsSealed` (envelope parses) is what a claim of protection is allowed to rest on. `ReservedHeaders`/`HasReserved`/`StripReserved` let a server strip or refuse protocol headers on submission |
 
 ### 4b. The exhaustive AEAD sweep
 
@@ -325,6 +326,24 @@ The property that caught F-11 and F-12 is the same one the protocol depends on:
 asserted by fuzz targets over the manifest parser, the identifier decoder,
 domain normalization and the header parser, and the failing inputs are kept as
 regression corpus.
+
+**F-17 was found by external review, and it is the one that should have been
+found here.**
+Every other finding in this document is about making a cryptographic claim
+*correct*. F-17 was about making one *at all*: `Seal` treated two headers as
+proof that a message was already sealed, which is the same category error the
+protocol was designed to remove from key installation — trusting an
+unauthenticated observation as if it were an authority. It escaped this review
+because the header check sat behind a convenience ("never double-seal") rather
+than a security claim, and convenience is where nobody looks for a bypass.
+
+The lesson is a rule, not a patch: **a claim of protection may only rest on
+something that authenticates**. Framing (`IsEncrypted`) answers "how should I
+try to read this"; proof (`IsSealed`, `EnvelopeOf`, `Open`) answers "was this
+protected". Only the second may reach a person. Servers additionally treat the
+protocol headers as theirs alone to write — `StripReserved` at the submission
+boundary, refusal at APIs that build messages themselves — so a submission can
+never pre-declare what only the server can perform.
 
 ## 5. Verdict
 

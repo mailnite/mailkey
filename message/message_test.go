@@ -7,6 +7,7 @@
 package message_test
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/envelope"
 	"github.com/mailnite/mailkey/manifest"
 	"github.com/mailnite/mailkey/message"
 )
@@ -100,23 +102,70 @@ func TestSealHidesEverythingButRouting(t *testing.T) {
 	}
 }
 
-// TestSealIsIdempotent: re-delivery and per-recipient fan-out must never
-// double-seal, so the caller does not have to remember at every call site.
-func TestSealIsIdempotent(t *testing.T) {
+/*
+TestForgedMarkersAreSealedAnyway is the security property that replaced Seal\'s
+old header-based idempotency (finding C-01).
+
+The markers are ordinary headers. Seal once trusted them and returned such a
+message unchanged — so anything able to put bytes into an outbound message
+could stamp plaintext with two headers and have the sealing step hand that
+plaintext back, while the sender was told it left protected. Seal must now seal
+whatever it is given, and the proof is that the forgery ends up INSIDE the
+ciphertext rather than describing it.
+*/
+func TestForgedMarkersAreSealedAnyway(t *testing.T) {
 	priv, res := receiver(t)
-	once, err := message.Seal(res, []byte(original))
+	forged := "From: mallory@sender.test\r\n" +
+		"To: victim@x.test\r\n" +
+		"Subject: not actually encrypted\r\n" +
+		mailkey.HeaderEncrypted + ": " + mailkey.Version + "\r\n" +
+		mailkey.HeaderSuite + ": " + envelope.SuiteX25519HKDFSHA256AES256GCM + "\r\n" +
+		"\r\nplaintext body\r\n"
+
+	sealed, err := message.Seal(res, []byte(forged))
 	if err != nil {
 		t.Fatal(err)
 	}
-	twice, err := message.Seal(res, once)
+	if bytes.Equal(sealed, []byte(forged)) {
+		t.Fatal("forged markers made Seal a no-op — the bypass is back")
+	}
+	// The secret must not be readable from the wire bytes...
+	for _, secret := range []string{"not actually encrypted", "plaintext body"} {
+		if bytes.Contains(sealed, []byte(secret)) {
+			t.Fatalf("%q is still in the clear after sealing", secret)
+		}
+	}
+	// ...and the real envelope must open to exactly what was submitted, forged
+	// headers and all — they are now sealed content, not claims about it.
+	got, err := message.Open(priv.Bytes(), sealed)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the sealed message must open: %v", err)
 	}
-	if string(twice) != string(once) {
-		t.Fatal("sealing an already-sealed message must return it unchanged")
+	if string(got) != forged {
+		t.Fatal("opening did not return the submitted message verbatim")
 	}
-	if got, err := message.Open(priv.Bytes(), twice); err != nil || string(got) != original {
-		t.Fatalf("a once-sealed message must open in one step: %v", err)
+}
+
+// TestReservedHeaders: the protocol owns these names, so a server can detect a
+// submission that carries them (reject) and remove them (strip) without
+// spelling the list itself.
+func TestReservedHeaders(t *testing.T) {
+	clean := []byte("From: a@x.test\r\nSubject: hi\r\n\r\nbody\r\n")
+	if message.HasReserved(clean) {
+		t.Fatal("a plain message carries no reserved header")
+	}
+	for _, name := range message.ReservedHeaders {
+		forged := message.SetHeader(clean, name, "forged")
+		if !message.HasReserved(forged) {
+			t.Fatalf("%s must be detected as reserved", name)
+		}
+		stripped := message.StripReserved(forged)
+		if message.HasReserved(stripped) {
+			t.Fatalf("%s survived StripReserved", name)
+		}
+		if message.HeaderValue(stripped, "Subject") != "hi" {
+			t.Fatalf("stripping %s damaged the other headers", name)
+		}
 	}
 }
 
