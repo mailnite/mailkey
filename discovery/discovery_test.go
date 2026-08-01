@@ -125,7 +125,6 @@ func TestHeaderRoundTrip(t *testing.T) {
 	for _, variant := range []string{
 		"v=MKDP1;d=example.com;id=" + manifest.EncodeID(id) + ";mode=https",
 		"  mode=https ;  id=" + manifest.EncodeID(id) + " ; d=EXAMPLE.com ; v=MKDP1  ",
-		"v=MKDP1; d=example.com", // id and mode are optional
 	} {
 		if _, err := discovery.ParseHeader(variant); err != nil {
 			t.Errorf("ParseHeader(%q): %v", variant, err)
@@ -138,7 +137,9 @@ func TestHeaderRoundTrip(t *testing.T) {
 func TestHeaderRejects(t *testing.T) {
 	id := manifest.EncodeID(testID(t))
 	for name, h := range map[string]string{
-		"missing version":   "d=example.com; id=" + id,
+		"missing version":   "d=example.com; id=" + id + "; mode=https",
+		"missing mode":      "v=MKDP1; d=example.com; id=" + id,
+		"missing id":        "v=MKDP1; d=example.com; mode=https",
 		"unknown version":   "v=MKDP2; d=example.com; id=" + id,
 		"unknown mode":      "v=MKDP1; d=example.com; mode=dns",
 		"missing domain":    "v=MKDP1; id=" + id,

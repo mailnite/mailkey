@@ -1,6 +1,6 @@
 # Domain Identity Keys and Signed Encryption Epochs (MKDP1-ID)
 
-Status: Draft 0.2
+Status: Draft 0.3
 Date: 2026-08-01
 Extends: 02-MKDP1-PROTOCOL.md, 03-PEERS-AND-RESOLUTION.md, 04-SECURITY.md
 
@@ -568,7 +568,70 @@ entirely:
 - the operational blast radius of a compromise;
 - the useful lifetime of accidentally copied or leaked key material.
 
-### 10.5 Receiver-side accounting
+### 10.5 Prerequisite: rotation may not precede shared accounting
+
+> Volume-based X25519 rotation MUST remain disabled until usage counters are
+> durable, shared across replicas, and the current-key transition is protected
+> by a linearizable compare-and-swap on `current_kid`.
+
+Until then the counters of §10.6 are TELEMETRY. They may be displayed and
+alerted on; they MUST NOT change a key. A fleet whose replicas each hold their
+own counters would otherwise rotate once per replica for a single threshold
+crossing.
+
+### 10.6 Storage layout and the transition CAS
+
+The current-key POINTER is stored apart from the generations it names, and
+apart from usage:
+
+```text
+domain/<domain>/current-kid   → K
+domain/<domain>/key/<K>       → wrapped generation and lifecycle
+domain/<domain>/usage/<K>     → messages, bytes
+```
+
+Two properties follow from the split. Keying usage by `kid` means a late
+delivery to a RETIRED key increments that key's counters and cannot disturb its
+successor's budget — the accounting follows the key that actually performed the
+ECDH. And because rotation touches only the pointer, the transition needs no
+read-modify-write of a record that also carries key material.
+
+Installation is ordered and guarded:
+
+1. write `key/<K2>` — the generation record, so the pointer can never name a
+   key that does not exist;
+2. then, in ONE linearizable operation:
+
+```text
+compare current-kid == K
+then    current-kid = K2
+else    discard candidate K2
+```
+
+The comparison and the successful update MUST be applied atomically — the
+standard CAS transaction shape (etcd's transaction model is the reference
+implementation of it). Several replicas may reach the threshold together; only
+one may win, and the losers MUST discard their candidate key rather than retry
+into a second rotation.
+
+### 10.7 The threshold is a soft trigger
+
+The volume threshold bounds compromise exposure; it is not an exact
+cryptographic ceiling, and an implementation MUST NOT present it as one:
+
+- duplicate delivery may increment twice;
+- a crash may delay or lose an increment;
+- concurrent messages may carry the count slightly past the threshold;
+- only one rotation wins the pointer CAS, so a simultaneous crossing rotates
+  once, not N times.
+
+This is acceptable because every message already derives its own AEAD key
+(§10.4): the counter limits how much history one stolen private key exposes,
+not how much data one symmetric key protects. An implementation that ever needs
+an exact ceiling MUST additionally deduplicate accounting by authenticated
+envelope or message identity.
+
+### 10.8 Receiver-side accounting
 
 An implementation SHOULD persist, per key generation:
 
@@ -603,7 +666,7 @@ if current_kid == expected_kid and threshold_reached:
 
 so that two replicas cannot rotate independently and simultaneously.
 
-### 10.6 Rotation publication order
+### 10.9 Rotation publication order
 
 1. generate the new X25519 key pair;
 2. durably store and wrap the private key;
@@ -625,14 +688,14 @@ retention_until = last_published_manifest_expiry
 Messages may legitimately arrive under a retired `kid` after rotation, because
 remote senders may hold an unexpired cached manifest naming it.
 
-### 10.7 Identity key policy
+### 10.10 Identity key policy
 
 The identity key MUST NOT rotate on message volume. It signs manifests, not
 messages. Rotate it only for: suspected compromise, algorithm migration,
 scheduled long-term hygiene, KMS/HSM migration, or administrative ownership
 change.
 
-### 10.8 The resulting hierarchy
+### 10.11 The resulting hierarchy
 
 ```text
 Ed25519 identity          years, incident-driven
@@ -654,14 +717,26 @@ choose a key by comparing any of the three.
 
 ## 12. Implementation phasing (non-normative)
 
-1. Identity custody, `fp`, signed manifests, the detached-proof transport with
-   its cardinality rules, atomic publication, interop vectors, and the
-   independent implementation's verification path.
-2. Sender-side pin state, the §6 matrix, replay protection, downgrade
-   protection, Peers UI showing the fingerprint and the rotation chain.
-3. Rotation and revocation statements, the identity resource and its bounding,
-   recovery and break-glass, publisher self-check.
-4. Key-lifecycle accounting and the §10.2 rotation policy.
+**P0 — identity signing.** Ed25519 identity and custody, `fp`, signed
+manifests, the detached-proof transport with its cardinality rules, atomic
+publication (§4.4), interop vectors, and the independent implementation's
+verification path. Manifest re-issue reuses the same X25519 key. Rotation stays
+manual, incident-driven, and bounded by a conservative maximum age only.
+
+**P0b — sender side.** Pin state, the §6 matrix, replay protection, downgrade
+protection, and the Peers UI showing the fingerprint and rotation chain.
+
+**P1 — shared custody.** One shared encrypted keyring for the cluster, no
+per-replica key state, replica-safe key GENERATION, and the transactional
+current-key pointer of §10.6.
+
+**P2 — durable lifecycle accounting.** Shared counters keyed by
+`(domain, kid)`, atomic increments on successful decryption, counter recovery
+across restarts, usage visible to every replica. Volume-triggered rotation is
+enabled only after this is verified in place — §10.5.
+
+**P3 — rotation and recovery.** Rotation and revocation statements, the identity
+resource and its bounding, recovery and break-glass, publisher self-check.
 
 A transparency log (the RFC 9162 model) would add detection of split-view
 rotation — an authority serving different identities to different senders, which

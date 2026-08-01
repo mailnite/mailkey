@@ -280,3 +280,54 @@ func Forget(p *mailkey.Peer) {
 	}
 	p.State = mailkey.StateDiscovered
 }
+
+/*
+Prunable reports whether a peer record is discovery residue that can be dropped.
+
+Header discovery means strangers decide which domains get a row here. Admission
+control bounds how fast those rows appear; this decides which of them ever go
+away, because a bound on the rate is not a bound on the total.
+
+The rule is deliberately narrow — the cost of deleting something that mattered
+is far higher than the cost of keeping a few empty rows:
+
+  - Only the automatic policy. "require" and "disabled" are decisions a human
+    made about a domain, and a decision is not a cache entry.
+  - Only peers that never learned a key. An effective manifest — or even a
+    historical one — means this record once described real cryptographic state,
+    and something in the queue may still name it.
+  - Only peers nothing has said anything about for ttl. An observation is the
+    domain being mentioned at all; while that keeps happening, the row is in
+    use.
+  - Never a peer an operator asked for by hand, however badly it went. A manual
+    observation is a person's request, and a failed one is exactly what they
+    would come back to look at.
+
+What survives all four is a domain that appeared in a header once, never
+resolved, and has not been mentioned since — which is the state a flood leaves
+behind.
+*/
+func Prunable(p *mailkey.Peer, now time.Time, ttl time.Duration) bool {
+	if p == nil || ttl <= 0 {
+		return false
+	}
+	if p.Policy != mailkey.PolicyAuto {
+		return false
+	}
+	if p.Effective != nil || len(p.History) > 0 {
+		return false
+	}
+	cutoff := now.Add(-ttl)
+	for _, o := range p.Observations {
+		if o.Source == mailkey.SourceManual {
+			return false
+		}
+		if o.ObservedAt.After(cutoff) {
+			return false
+		}
+	}
+	if p.LastVerifiedAt.After(cutoff) {
+		return false
+	}
+	return true
+}

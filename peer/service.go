@@ -48,6 +48,11 @@ type Service struct {
 	// matter how many messages mention it.
 	pmu     sync.Mutex
 	pending map[string]struct{}
+
+	// adm bounds what untrusted observations may turn into durable state. The
+	// queue above bounds the network cost of a flood; this bounds the storage
+	// cost, which is the half that survives a restart (admission.go).
+	adm *admission
 }
 
 var _ mailkey.Service = (*Service)(nil)
@@ -63,8 +68,17 @@ type Options struct {
 	Now func() time.Time
 	// OnError receives background resolution failures.
 	OnError func(domain string, err error)
-	// OnDrop receives domains whose trigger was dropped by a full queue.
+	// OnDrop receives domains whose trigger was dropped by a full queue, or
+	// whose observation was refused admission.
 	OnDrop func(domain string)
+	// ObserveInterval coalesces repeated identical observations about one
+	// domain: within it, the same evidence is not written again. Default 10m.
+	ObserveInterval time.Duration
+	// NewPeerBurst and NewPeerEvery bound how fast domains we have never seen
+	// may become durable peer records. Defaults: 256 burst, one per ~14s
+	// sustained (256/hour). Only FIRST sightings spend budget.
+	NewPeerBurst int
+	NewPeerEvery time.Duration
 }
 
 // NewService builds a Service and starts its workers. Call Close to stop them.
@@ -84,6 +98,7 @@ func NewService(r mailkey.Resolver, s mailkey.Store, opts Options) *Service {
 		queue:   make(chan string, opts.QueueSize),
 		stopped: make(chan struct{}),
 		pending: map[string]struct{}{},
+		adm:     newAdmission(opts.ObserveInterval, opts.NewPeerBurst, opts.NewPeerEvery, opts.Now()),
 	}
 	for range opts.Workers {
 		svc.wg.Add(1)
@@ -179,10 +194,7 @@ func (s *Service) ObserveDNS(ctx context.Context, domain string, txt []string) e
 		o.Status = mailkey.ObservationInconsistent
 		o.Context = "several different manifest ids advertised"
 	}
-	if err := s.store.PutObservation(ctx, d, o); err != nil {
-		return err
-	}
-	return s.scheduleIfBehind(ctx, d)
+	return s.observe(ctx, d, o)
 }
 
 // ObserveHeader records a Mail-Key observation from inbound mail. It never
@@ -201,10 +213,43 @@ func (s *Service) ObserveHeader(ctx context.Context, headerValue, msgContext str
 	if ad.HasID {
 		o.ManifestID, o.HasID = ad.ManifestID, true
 	}
-	if err := s.store.PutObservation(ctx, ad.Domain, o); err != nil {
+	return s.observe(ctx, ad.Domain, o)
+}
+
+/*
+observe is the admitted write path shared by both observation sources.
+
+Order matters and is the whole point. The in-memory checks come FIRST, so the
+common flood — the same domain advertising the same id in message after message
+— is answered without reading or writing anything. Only evidence that survives
+those touches the store, and only then do we find out whether the domain is new.
+
+A refusal returns nil, never an error: an observation is a hint, ObserveHeader
+is called from the inbound path, and failing mail because a stranger's header
+arrived too often would turn a rate limit into a denial of service of its own.
+*/
+func (s *Service) observe(ctx context.Context, domain string, o mailkey.Observation) error {
+	now := s.now()
+	if !s.adm.allowObservation(domain, o.Source, o.ManifestID, o.HasID, now) {
+		return nil // the same evidence, again, within the interval
+	}
+	p, err := s.store.GetPeer(ctx, domain)
+	if err != nil {
 		return err
 	}
-	return s.scheduleIfBehind(ctx, ad.Domain)
+	if p == nil && !s.adm.allowNewPeer(now) {
+		// A first sighting with no budget left. Dropped, and visibly so: the
+		// domain is discovered by a later message, or resolved synchronously
+		// the moment we actually send mail to it.
+		if s.onDrop != nil {
+			s.onDrop(domain)
+		}
+		return nil
+	}
+	if err := s.store.PutObservation(ctx, domain, o); err != nil {
+		return err
+	}
+	return s.scheduleIfBehind(ctx, domain)
 }
 
 // scheduleIfBehind queues a background resolution when the peer's cache does
@@ -250,6 +295,10 @@ func (s *Service) AddPeer(ctx context.Context, domain string) (mailkey.Peer, err
 	if err != nil {
 		return mailkey.Peer{}, err
 	}
+	// An operator asking for a domain outranks anything admission remembers
+	// about it — including a refusal, which must not linger as a reason to
+	// ignore the observations that follow.
+	s.adm.forget(d)
 	if err := s.store.PutObservation(ctx, d, mailkey.Observation{
 		Source: mailkey.SourceManual, ObservedAt: s.now(), Status: mailkey.ObservationPending,
 	}); err != nil {
@@ -344,6 +393,10 @@ func (s *Service) Forget(ctx context.Context, domain string) error {
 	if err != nil {
 		return err
 	}
+	// Forgetting a peer forgets what admission remembers too: the next
+	// observation should be able to rediscover the domain immediately, which is
+	// what "not a blocklist" means.
+	s.adm.forget(d)
 	return s.store.ForgetPeer(ctx, d)
 }
 

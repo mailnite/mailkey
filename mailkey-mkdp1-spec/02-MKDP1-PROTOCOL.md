@@ -38,6 +38,8 @@ v=MKDP1; id=<base64url manifest ID>; mode=https
 
 Rules:
 
+- `v`, `id` and `mode` are all REQUIRED; a record missing any of them is
+  malformed.
 - `v` MUST equal `MKDP1`.
 - `mode` MUST equal `https`.
 - `id` MUST decode as exactly 32 bytes using unpadded base64url.
@@ -56,6 +58,8 @@ Mail-Key: v=MKDP1; d=example.com; id=<base64url manifest ID>; mode=https
 
 Rules:
 
+- `v`, `d`, `id` and `mode` are all REQUIRED; a field missing any of them is
+  malformed and MUST be ignored.
 - `d` is the normalized email domain, not `mail.example.com`.
 - The HTTPS hostname is derived as `mail.<d>`.
 - The header MUST NOT contain a public key.

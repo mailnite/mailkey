@@ -34,6 +34,7 @@ authenticates it; it does not hide it.
 package envelope
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -41,8 +42,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"time"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/discovery"
 	"github.com/mailnite/mailkey/manifest"
 	"go.arpabet.com/value"
 	"golang.org/x/xerrors"
@@ -96,19 +99,69 @@ type Envelope struct {
 	Ciphertext []byte
 }
 
-// Seal encrypts plaintext to a validated manifest result. The caller passes the
-// Result it got from the resolver, so the envelope's identifiers cannot drift
-// from the manifest that authorized the key.
+/*
+Seal encrypts plaintext to a validated manifest result.
+
+The envelope's header is not decoration: the recipient domain, the kid and the
+manifest id are authenticated with the ciphertext, and a receiver uses the kid
+to pick a private key and the manifest id to audit how the message came to be
+encrypted this way. All three are copied from the caller's Result, which is why
+this function checks the Result against ITSELF before copying anything.
+
+The resolver produces consistent Results, so nothing in this repository could
+reach the bad case. But Seal is public API — a host application, or a future
+caller inside this library, can build a Result by hand — and an inconsistent one
+produces an envelope that is cryptographically perfect and semantically false: a
+kid naming a key other than the one the ciphertext is actually encrypted to, or
+a manifest id naming a manifest that never said any of this. Nothing downstream
+can detect that, because everything downstream trusts the header the AEAD tag
+protects. Validation belongs here, at the one point where the claim is made.
+
+Every check recomputes rather than compares fields to each other:
+
+  - the manifest's canonical bytes are repacked from the manifest itself, which
+    is also what enforces the suite and that the kid is the kid OF this key
+    (manifest.Pack);
+  - the manifest id must be the hash of those bytes;
+  - a Result carrying raw bytes must carry exactly those bytes;
+  - the domain must be the normalized form, since that is what a receiver
+    derives its authority host from;
+  - and an expired manifest is refused, because sealing to a key whose
+    advertised lifetime has ended is sealing to a key the recipient may already
+    have retired.
+*/
 func Seal(r mailkey.Result, plaintext []byte) (*Envelope, error) {
 	m := r.Manifest
 	if m.Domain == "" {
 		return nil, xerrors.New("seal: manifest has no domain")
+	}
+	if d, err := discovery.Normalize(m.Domain); err != nil || d != m.Domain {
+		return nil, xerrors.Errorf("seal: manifest domain %q is not normalized", m.Domain)
 	}
 	if m.Key.Algorithm != mailkey.AlgX25519 || m.Key.Encryption != mailkey.EncAES256GCM {
 		return nil, xerrors.Errorf("seal: unsupported suite %s/%s", m.Key.Algorithm, m.Key.Encryption)
 	}
 	if len(m.Key.PublicKey) != pubKeyLen {
 		return nil, xerrors.Errorf("seal: public key must be %d bytes, got %d", pubKeyLen, len(m.Key.PublicKey))
+	}
+	// Repacking validates the manifest as an object and yields the only bytes
+	// its identifier may be computed from. It fails if the kid does not match
+	// the key it sits beside.
+	canonical, err := manifest.Pack(m)
+	if err != nil {
+		return nil, xerrors.Errorf("seal: %w", err)
+	}
+	if id := manifest.ManifestIDOf(canonical); id != r.ManifestID {
+		return nil, xerrors.New("seal: manifest id does not identify this manifest")
+	}
+	if len(r.Raw) > 0 && !bytes.Equal(r.Raw, canonical) {
+		return nil, xerrors.New("seal: result bytes are not the manifest's canonical form")
+	}
+	if m.ExpiresAt.IsZero() {
+		return nil, xerrors.New("seal: manifest has no expiry")
+	}
+	if !m.ExpiresAt.After(time.Now()) {
+		return nil, xerrors.Errorf("seal: manifest for %s expired at %s", m.Domain, m.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 	pub, err := ecdh.X25519().NewPublicKey(m.Key.PublicKey)
 	if err != nil {

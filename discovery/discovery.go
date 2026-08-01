@@ -269,12 +269,24 @@ func FormatDNS(id mailkey.ManifestID) string {
 	return "v=" + mailkey.Version + "; id=" + encodeID(id) + "; mode=" + mailkey.Mode
 }
 
-// parseParams parses the shared "k=v; k=v" grammar. requireDomain marks the
-// header form, where d= is mandatory; the DNS form takes its domain from the
-// owner name that was queried.
-//
-// Unknown versions and modes are refused, not guessed at: a client that cannot
-// name the semantics of an object must not act on it.
+/*
+parseParams parses the shared "k=v; k=v" grammar. requireDomain marks the header
+form, where d= is mandatory; the DNS form takes its domain from the owner name
+that was queried.
+
+v, id and mode are all REQUIRED (02-MKDP1-PROTOCOL.md §2 and §3). They used to
+be accepted as optional, which was wrong in two different ways. An unknown or
+absent MODE is the protocol asking to be interpreted some way we do not know;
+guessing "https" is exactly the guess a future mode would punish, and a client
+that cannot name the semantics of an object must not act on it. And an
+advertisement with no ID cannot do the only job an advertisement has — say which
+manifest to expect — so accepting one produced peer records with nothing to
+check, from input anybody can send.
+
+Refusing is cheap here: both forms treat a parse failure as "not an
+advertisement", which the spec requires anyway (a malformed record MUST be
+ignored and recorded diagnostically).
+*/
 func parseParams(s, domain string, requireDomain bool) (mailkey.Advertisement, error) {
 	var zero mailkey.Advertisement
 	fields := map[string]string{}
@@ -297,7 +309,10 @@ func parseParams(s, domain string, requireDomain bool) (mailkey.Advertisement, e
 	if fields["v"] != mailkey.Version {
 		return zero, xerrors.Errorf("advertisement: unsupported version %q", fields["v"])
 	}
-	if m, ok := fields["mode"]; ok && m != mailkey.Mode {
+	switch m, ok := fields["mode"]; {
+	case !ok:
+		return zero, xerrors.New("advertisement: missing mode=")
+	case m != mailkey.Mode:
 		return zero, xerrors.Errorf("advertisement: unsupported mode %q", m)
 	}
 	ad := mailkey.Advertisement{Version: mailkey.Version, Mode: mailkey.Mode, Domain: domain}
@@ -321,12 +336,14 @@ func parseParams(s, domain string, requireDomain bool) (mailkey.Advertisement, e
 			return zero, xerrors.Errorf("advertisement: field %q is not part of MKDP1", forbidden)
 		}
 	}
-	if idv, ok := fields["id"]; ok {
-		id, err := decodeID(idv)
-		if err != nil {
-			return zero, xerrors.Errorf("advertisement: id: %w", err)
-		}
-		ad.ManifestID, ad.HasID = id, true
+	idv, ok := fields["id"]
+	if !ok {
+		return zero, xerrors.New("advertisement: missing id=")
 	}
+	id, err := decodeID(idv)
+	if err != nil {
+		return zero, xerrors.Errorf("advertisement: id: %w", err)
+	}
+	ad.ManifestID, ad.HasID = id, true
 	return ad, nil
 }

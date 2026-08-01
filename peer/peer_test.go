@@ -540,16 +540,21 @@ func TestAsyncQueueIsBoundedAndCoalesces(t *testing.T) {
 	svc := peer.NewService(r, st, peer.Options{
 		Now: now, Workers: 1, QueueSize: 2,
 		OnDrop: func(string) { dropped.Add(1) },
+		// This test is about the QUEUE bound, so admission is set out of the
+		// way: with a smaller budget the storm would be refused before it ever
+		// reached the queue, and the test would pass without testing anything.
+		NewPeerBurst: 10_000,
 	})
 	defer svc.Close()
 	ctx := context.Background()
 
 	// A storm of headers for many distinct domains, with the resolver blocked
 	// so the queue cannot drain.
+	id := manifest.EncodeID(makeResult(t, domain, clock, time.Hour).ManifestID)
 	const storm = 200
 	for i := range storm {
 		d := "d" + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + ".example"
-		_ = svc.ObserveHeader(ctx, "v=MKDP1; d="+d, "msg")
+		_ = svc.ObserveHeader(ctx, "v=MKDP1; d="+d+"; id="+id+"; mode=https", "msg")
 	}
 	if dropped.Load() == 0 {
 		t.Fatal("a storm past the queue bound must drop triggers rather than grow")

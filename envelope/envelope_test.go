@@ -258,3 +258,83 @@ func TestUnmarshalRejects(t *testing.T) {
 		t.Error("an unknown version must not marshal")
 	}
 }
+
+/*
+TestSealRefusesInconsistentResults: the header a sender writes is authenticated,
+so nothing downstream can question it — which makes Seal the last place an
+inconsistent claim can be caught.
+
+Each case here produces an envelope that is cryptographically flawless and
+semantically a lie: a manifest id that identifies nothing the sender used, raw
+bytes that are not the manifest they accompany, a domain in a form no receiver
+derives its authority from, or a key whose advertised life is over. The
+resolver never builds any of them; the public API used to allow all four.
+*/
+func TestSealRefusesInconsistentResults(t *testing.T) {
+	_, good := receiver(t, testDomain)
+	plaintext := []byte("body")
+
+	t.Run("manifest id identifies something else", func(t *testing.T) {
+		bad := good
+		bad.ManifestID[0] ^= 0xff
+		if _, err := envelope.Seal(bad, plaintext); err == nil {
+			t.Fatal("a manifest id that does not hash this manifest must be refused")
+		}
+	})
+
+	t.Run("raw bytes are not the canonical form", func(t *testing.T) {
+		bad := good
+		bad.Raw = append(append([]byte(nil), good.Raw...), 0x00)
+		if _, err := envelope.Seal(bad, plaintext); err == nil {
+			t.Fatal("result bytes that are not the manifest's canonical encoding must be refused")
+		}
+	})
+
+	t.Run("kid names another key", func(t *testing.T) {
+		other, _ := receiver(t, testDomain)
+		bad := good
+		otherKid, err := manifest.KeyIDOf(testDomain, mailkey.AlgX25519, mailkey.EncAES256GCM, other.PublicKey().Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad.Manifest.Key.Kid = otherKid
+		if _, err := envelope.Seal(bad, plaintext); err == nil {
+			t.Fatal("a kid naming a key other than the one sealed to must be refused")
+		}
+	})
+
+	t.Run("domain is not normalized", func(t *testing.T) {
+		bad := good
+		bad.Manifest.Domain = "EXAMPLE.com"
+		if _, err := envelope.Seal(bad, plaintext); err == nil {
+			t.Fatal("an unnormalized domain must be refused: a receiver derives its authority host from it")
+		}
+	})
+
+	t.Run("manifest has expired", func(t *testing.T) {
+		priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		then := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+		m, err := manifest.New(testDomain, then, then.Add(24*time.Hour),
+			mailkey.AlgX25519, mailkey.EncAES256GCM, priv.PublicKey().Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := manifest.Pack(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expired := mailkey.Result{Manifest: m, ManifestID: manifest.ManifestIDOf(raw), Raw: raw}
+		if _, err := envelope.Seal(expired, plaintext); err == nil {
+			t.Fatal("sealing to a manifest whose lifetime has ended must be refused")
+		}
+	})
+
+	// The consistent result still works, so the checks did not simply make Seal
+	// impossible to satisfy.
+	if _, err := envelope.Seal(good, plaintext); err != nil {
+		t.Fatalf("a result straight from discovery must still seal: %v", err)
+	}
+}
