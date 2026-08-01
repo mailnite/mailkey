@@ -67,6 +67,10 @@ are hints that allow a sender to reuse or refresh its local manifest cache.
 - `04-SECURITY.md` — trust boundary, downgrade behavior, and threat model.
 - `05-GO-IMPLEMENTATION.md` — proposed Go packages and Mailnite integration.
 - `06-TEST-PLAN.md` — unit, integration, interoperability, and security tests.
+- `07-DOMAIN-IDENTITY.md` — PROPOSED extension: a long-lived Ed25519 domain
+  identity that signs short-lived X25519 encryption epochs, so a sender that
+  has met a domain once can verify later rotations without trusting the HTTPS
+  authority again. Closes the limitation 04-SECURITY.md §6 records as accepted.
 
 ## Important implementation principle
 
