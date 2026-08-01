@@ -738,6 +738,68 @@ enabled only after this is verified in place — §10.5.
 **P3 — rotation and recovery.** Rotation and revocation statements, the identity
 resource and its bounding, recovery and break-glass, publisher self-check.
 
+**P4 — enforcement and operator interaction.** Everything above decides what is
+TRUE. This phase decides what happens to a message when the answer is bad, and it
+is last because the earlier phases are what keep its false-positive rate low
+enough to be acceptable.
+
+*The downgrade latch (C-02).* `EverHTTPSValidated` MUST be persisted separately
+from observations and from administrator policy, and a peer carrying it that has
+no usable manifest MUST fail closed with `ErrEncryptionRequired` rather than send
+in the clear. Today that guarantee is documented on `ResolveForEncryption` but
+enforced only under `PolicyRequire`, so an attacker who waits for a cached
+manifest to expire and then disrupts the refresh returns an established peer to
+plaintext. Only an explicit administrator "disable MKDP1 for this domain"
+operation may clear the latch; `Forget` MUST preserve it, which means it cannot
+live in the record `Forget` deletes.
+
+*Actions are per channel, because the channels differ in who can answer.* One
+pure mapping from `(verdict, channel capability, per-domain policy, global
+default)` to an action — proceed, defer, reject, ask — with `ask` producible only
+on an interactive channel. Defaults MUST prefer deferral to rejection: an
+attacker who can strip a header should be able to delay mail, never destroy it,
+which is the same reasoning that made the fail-closed outbound path answer 451.
+
+*Proceeding is not one thing.* For an identity refusal, "proceed" means encrypting
+to a WebPKI-authenticated manifest without honouring the pin — legacy MKDP1
+security, and a defensible operator choice during rollout. For the latch there is
+no key at all, so "proceed" means cleartext; that option MUST NOT be offered as a
+per-message override on any channel, only as the separately warned administrator
+operation above. A message sent under either form of "proceed" MUST NOT be
+recorded or displayed as verified: a protection claim may only rest on something
+that authenticates.
+
+*Channels.* Interactive webmail asks at send time, while the sender still has the
+message in front of them, and its answers map onto state that already exists —
+send this one anyway, do not send, or trust this identity for this domain (an
+administrator re-pin). A transactional API returns a distinct error per
+action-needed reason and MAY accept an explicit override flag on submission, so
+the client chooses its own policy. SMTP submission has only response codes and
+takes them from the configured policy. Server-generated mail — vacation replies,
+delivery notifications, protocol reports — is a fourth channel with no user and
+no useful deferral: a notification that never delivers is a lost notification.
+
+*Refusals MUST be reviewable, per peer.* Every withheld pin, refused response and
+held message is a fact about ONE domain, so it belongs on that domain's record
+rather than only in a log an operator reads after being told to. An
+implementation SHOULD keep a bounded, coalesced issue history per peer — reason
+code, first and last seen, count — because the same failure repeats on every
+retry and an unbounded list of identical rows is not review, it is noise. The
+reason CODE is the part that must be stored: prose describes an incident, a code
+lets the surface group them and offer the action that resolves them.
+
+*And they MUST reach an operator*, once per domain per condition rather than once
+per message, for the same reason §7 restricts what DNS may carry: an alert that
+fires routinely is an alert that gets ignored. Held mail, a pinned domain whose
+authority changed signer, and a withheld pin are worth waking someone for. An
+unsigned domain is not — it is the majority of the internet.
+
+*Two operations, not one.* Clearing cached manifests so a domain can be
+rediscovered is hygiene and MUST preserve the capability latch. Clearing the
+latch is a security decision that re-permits plaintext and MUST be a separate,
+explicitly warned action. A single control that does both means the safe
+operation silently carries the dangerous one.
+
 A transparency log (the RFC 9162 model) would add detection of split-view
 rotation — an authority serving different identities to different senders, which
 §6 catches only for those who observe the discrepancy. The statement formats
