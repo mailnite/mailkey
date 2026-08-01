@@ -213,7 +213,12 @@ type Advertisement struct {
 	Domain     string
 	ManifestID ManifestID
 	HasID      bool
-	Mode       string
+	// Fingerprint is the domain's advertised signing identity. An OBSERVATION:
+	// it can corroborate a pin or contest one, and it can never install one —
+	// which is also why the record carries a fingerprint and never a public key.
+	Fingerprint Fingerprint
+	HasFP       bool
+	Mode        string
 }
 
 // Result is one successful authority fetch: the validated manifest plus the
@@ -226,6 +231,20 @@ type Result struct {
 	FetchedAt  time.Time
 	ExpiresAt  time.Time
 	TLSHost    string
+	// Proof is the detached identity signature the authority served, verified
+	// as internally consistent (the signer is the fingerprint of the supplied
+	// key, and the signature covers Raw). nil when the domain published none.
+	//
+	// Internally consistent is NOT trusted: whether this signer is the identity
+	// this sender pins for the domain is decided against the peer's pin, not
+	// here. An attacker's own proof is internally consistent too.
+	Proof *Proof
+	// ProofError records a proof that was PRESENT and WRONG — malformed fields,
+	// a signer that is not the key's fingerprint, a signature that does not
+	// verify. Distinct from Proof==nil, and the distinction is the whole
+	// downgrade defense: absent means "this domain does not sign", invalid
+	// means "something tampered with a domain that does".
+	ProofError string
 }
 
 // Resolver fetches and validates the effective manifest of a domain from the
@@ -329,7 +348,74 @@ type Peer struct {
 	// different valid manifests. MKDP1 refuses to invent a tie-break rule, so
 	// this surfaces as a warning for a human instead.
 	AuthorityUnstable bool
+
+	// Identity is this sender's long-term trust state for the domain: the
+	// pinned signing key, if any, and what has been observed about it.
+	Identity IdentityState
 }
+
+/*
+IdentityState is the sender half of the identity extension — what THIS sender
+has decided to trust about a domain, kept across manifests, rotations and years.
+
+Three facts are persisted independently because they answer different questions
+and each is load-bearing on its own:
+
+  - Pinned/Fingerprint: the trust anchor. Once set, a manifest signed by anything
+    else is not a rotation, it is an alarm.
+  - EverHTTPSValidated: downgrade protection. Set by ANY successful HTTPS
+    retrieval, including an unsigned one and including a fetch after which
+    pinning was withheld — so a domain that once answered over HTTPS may never
+    silently fall back to plaintext during a later outage.
+  - Status: whether long-term trust was withheld, and why. "Contested" is not a
+    weaker pin; it is the deliberate refusal to create one while the evidence
+    disagrees, and it must survive restarts or the next fetch would pin whatever
+    it happened to see.
+
+Merging any two of them loses something. In particular, a peer can be
+EverHTTPSValidated (fail-closed on transport) while unpinned (no long-term
+anchor) — which is exactly the state §6.2's contested row describes.
+*/
+type IdentityState struct {
+	Status IdentityStatus
+	// Fingerprint is the PINNED signing identity, set only when Status is
+	// IdentityPinned.
+	Fingerprint Fingerprint
+	PinnedAt    time.Time
+	// EverHTTPSValidated records that this domain has answered at least one
+	// successful HTTPS authority fetch. It never returns to false.
+	EverHTTPSValidated bool
+	// DNSFingerprint is the fp last seen in DNS — an OBSERVATION. It can
+	// corroborate a pin or contest one; it can never install or replace one.
+	DNSFingerprint Fingerprint
+	HasDNSFP       bool
+	// LastVerifiedIssuedAt and LastVerifiedManifestID are the replay defense
+	// (§6.4): a signature proves authorization, not freshness, so an attacker
+	// who can serve responses could otherwise return yesterday's still-valid
+	// signed manifest forever.
+	LastVerifiedIssuedAt   time.Time
+	LastVerifiedManifestID ManifestID
+	// Contested records why a pin was withheld or an alarm raised, for an
+	// operator. Never used as an input to a decision.
+	Contested string
+}
+
+// IdentityStatus is a domain's long-term trust position for this sender.
+type IdentityStatus string
+
+const (
+	// IdentityUnpinned: no identity has been established. Legacy WebPKI
+	// behaviour — this is where every relationship starts, and where an
+	// unsigned domain stays.
+	IdentityUnpinned IdentityStatus = "unpinned"
+	// IdentityPinned: a signer is trusted for this domain. A manifest signed by
+	// anything else is refused until an authorized rotation says otherwise.
+	IdentityPinned IdentityStatus = "pinned"
+	// IdentityContested: evidence disagreed, so pinning was WITHHELD. Mail is
+	// still encrypted — to a WebPKI-authenticated key that an attacker may
+	// hold — and the operator must be told exactly that.
+	IdentityContested IdentityStatus = "contested"
+)
 
 // Store is the persistence seam. Implementations may use any database; the
 // protocol requires only that InstallManifest is atomic.

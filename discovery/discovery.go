@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/manifest"
 	"golang.org/x/net/idna"
 	"golang.org/x/xerrors"
 )
@@ -264,9 +265,28 @@ func FormatHeader(domain string, id mailkey.ManifestID) (string, error) {
 	return "v=" + mailkey.Version + "; d=" + d + "; id=" + encodeID(id) + "; mode=" + mailkey.Mode, nil
 }
 
-// FormatDNS renders the TXT value a server publishes for its own domain.
-func FormatDNS(id mailkey.ManifestID) string {
-	return "v=" + mailkey.Version + "; id=" + encodeID(id) + "; mode=" + mailkey.Mode
+/*
+FormatDNS renders the TXT value a server publishes for its own domain.
+
+It advertises the identity FINGERPRINT, not the manifest id. The id changes on
+every manifest re-issue, so a published record goes stale within days of being
+written — which defeats its purpose and, for any implementation that refreshes on
+disagreement, produces one authority fetch per message. The fingerprint changes
+only on identity rollover: never on an ordinary X25519 rotation, never on manifest
+renewal. A record should carry only values whose change is rare and meaningful,
+because an alert that fires routinely is an alert that gets ignored.
+
+A domain with no identity key yet falls back to the deprecated id= form, so it
+still publishes something a resolver can act on.
+*/
+func FormatDNS(fp mailkey.Fingerprint, hasFP bool, id mailkey.ManifestID) string {
+	out := "v=" + mailkey.Version
+	if hasFP {
+		out += "; fp=" + manifest.EncodeID(fp)
+	} else {
+		out += "; id=" + encodeID(id)
+	}
+	return out + "; mode=" + mailkey.Mode
 }
 
 /*
@@ -336,14 +356,37 @@ func parseParams(s, domain string, requireDomain bool) (mailkey.Advertisement, e
 			return zero, xerrors.Errorf("advertisement: field %q is not part of MKDP1", forbidden)
 		}
 	}
-	idv, ok := fields["id"]
-	if !ok {
-		return zero, xerrors.New("advertisement: missing id=")
+	// fp names the domain's signing IDENTITY; id names one fetch. Both are
+	// observations and neither installs anything, but their lifetimes differ by
+	// orders of magnitude, which is why fp replaced id as the thing worth
+	// publishing: id changes on every manifest re-issue (issued_at is inside the
+	// hashed bytes), so a record written today is stale within days, and an
+	// implementation that refreshes on disagreement ends up fetching the
+	// authority once per message. fp changes only on identity rollover.
+	//
+	// A malformed fp makes the RECORD malformed. It must never degrade to "no
+	// fingerprint": that would let an attacker who can corrupt one character
+	// turn corroboration off silently, which is the whole value DNS adds.
+	if fpv, present := fields["fp"]; present {
+		fp, ferr := decodeID(fpv)
+		if ferr != nil {
+			return zero, xerrors.Errorf("advertisement: fp: %w", ferr)
+		}
+		ad.Fingerprint, ad.HasFP = mailkey.Fingerprint(fp), true
 	}
-	id, err := decodeID(idv)
-	if err != nil {
-		return zero, xerrors.Errorf("advertisement: id: %w", err)
+	if idv, present := fields["id"]; present {
+		id, ierr := decodeID(idv)
+		if ierr != nil {
+			return zero, xerrors.Errorf("advertisement: id: %w", ierr)
+		}
+		ad.ManifestID, ad.HasID = id, true
 	}
-	ad.ManifestID, ad.HasID = id, true
+	// One or the other must be there. A record naming neither cannot do the only
+	// job an advertisement has — say which object the authority should be holding
+	// — and acting on it would mean fetching on the strength of "something
+	// exists", which any observer could assert.
+	if !ad.HasID && !ad.HasFP {
+		return zero, xerrors.New("advertisement: needs fp= (or the deprecated id=)")
+	}
 	return ad, nil
 }

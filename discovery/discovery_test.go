@@ -172,9 +172,9 @@ func TestParseDNS(t *testing.T) {
 	idB[0] ^= 0xff
 
 	ads, skipped, err := discovery.ParseDNS("example.com", []string{
-		discovery.FormatDNS(idA),
+		discovery.FormatDNS(mailkey.Fingerprint{}, false, idA),
 		"v=spf1 include:_spf.example.com ~all", // an unrelated TXT record
-		discovery.FormatDNS(idB),
+		discovery.FormatDNS(mailkey.Fingerprint{}, false, idB),
 		"v=MKDP1; id=broken",
 	})
 	if err != nil {

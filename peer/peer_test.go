@@ -103,7 +103,7 @@ func TestObservationsNeverInstallAKey(t *testing.T) {
 	id := makeResult(t, domain, clock, 24*time.Hour).ManifestID
 	r.set(mailkey.Result{}, errors.New("authority unreachable"))
 
-	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(id)}); err != nil {
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(mailkey.Fingerprint{}, false, id)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.ObserveHeader(ctx, "v=MKDP1; d="+domain+"; id="+manifest.EncodeID(id)+"; mode=https", "msg-1"); err != nil {
@@ -154,7 +154,7 @@ func TestReconciliationNoWinnerSelection(t *testing.T) {
 	}
 
 	r.set(mailkey.Result{}, errors.New("down"))
-	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(idB)}); err != nil {
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(mailkey.Fingerprint{}, false, idB)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.ObserveHeader(ctx, "v=MKDP1; d="+domain+"; id="+manifest.EncodeID(idC), "msg"); err != nil {
@@ -183,7 +183,7 @@ func TestReconciliationNoWinnerSelection(t *testing.T) {
 
 	// An observation that MATCHES the effective manifest is confirmed, and
 	// confirms without a refresh.
-	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(resD.ManifestID)}); err != nil {
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(mailkey.Fingerprint{}, false, resD.ManifestID)}); err != nil {
 		t.Fatal(err)
 	}
 	p2, _ := st.GetPeer(ctx, domain)
@@ -223,7 +223,7 @@ func TestMatchingObservationCostsNoFetch(t *testing.T) {
 	before := r.calls.Load() // the one synchronous fetch above
 
 	// Both sources report exactly the id we already hold.
-	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(res.ManifestID)}); err != nil {
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(mailkey.Fingerprint{}, false, res.ManifestID)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.ObserveHeader(ctx, "v=MKDP1; d="+domain+"; id="+manifest.EncodeID(res.ManifestID), "msg"); err != nil {
@@ -246,7 +246,7 @@ func TestInconsistentDNSIsRecordedNotArbitrated(t *testing.T) {
 
 	a := makeResult(t, domain, clock, time.Hour).ManifestID
 	b := makeResult(t, domain, clock, 2*time.Hour).ManifestID
-	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(a), discovery.FormatDNS(b)}); err != nil {
+	if err := svc.ObserveDNS(ctx, domain, []string{discovery.FormatDNS(mailkey.Fingerprint{}, false, a), discovery.FormatDNS(mailkey.Fingerprint{}, false, b)}); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := st.GetPeer(ctx, domain)

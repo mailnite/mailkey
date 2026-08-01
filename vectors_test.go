@@ -153,7 +153,7 @@ func TestPublishedManifestVectors(t *testing.T) {
 	if err != nil || name != v.Manifest.DNSOwnerName {
 		t.Fatalf("dns owner name = %q (%v), published %q", name, err, v.Manifest.DNSOwnerName)
 	}
-	if got := discovery.FormatDNS(manifest.ManifestIDOf(raw)); got != v.Manifest.DNSTxtValue {
+	if got := discovery.FormatDNS(mailkey.Fingerprint{}, false, manifest.ManifestIDOf(raw)); got != v.Manifest.DNSTxtValue {
 		t.Fatalf("dns txt = %q, published %q", got, v.Manifest.DNSTxtValue)
 	}
 	hdr, err := discovery.FormatHeader(in.Domain, manifest.ManifestIDOf(raw))

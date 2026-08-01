@@ -48,6 +48,7 @@ import (
 
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/manifest"
 	"golang.org/x/xerrors"
 )
@@ -299,7 +300,7 @@ func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) 
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailureProtocol, d, err)
 	}
 
-	return mailkey.Result{
+	out := mailkey.Result{
 		Manifest:   m,
 		ManifestID: manifest.ManifestIDOf(body),
 		Raw:        body,
@@ -308,7 +309,33 @@ func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) 
 		// for a shorter life gets it.
 		ExpiresAt: cacheUntil(m.ExpiresAt, now, resp.Header.Get("Cache-Control")),
 		TLSHost:   host,
-	}, nil
+	}
+	/*
+		The detached identity proof, read from the SAME response as the body.
+
+		A malformed proof does not fail the resolution, and that is deliberate:
+		the manifest is WebPKI-authenticated and independently valid, so refusing
+		it here would take a domain's encryption offline on the strength of a
+		header — the failure an attacker who can only corrupt headers would
+		choose. What the trust layer needs is the DISTINCTION, so it is recorded:
+		Proof set means "this domain signs and the signature checks out against
+		the key it presented", ProofError set means "a proof was present and
+		wrong", and both empty means "this domain does not sign".
+
+		Only the peer's pin can turn any of those into a decision. Verifying here
+		and treating success as authentication would be the mistake the whole
+		extension exists to avoid — an attacker's own proof verifies perfectly.
+	*/
+	if proof, found, perr := identity.ReadProof(resp.Header); perr != nil {
+		out.ProofError = perr.Error()
+	} else if found {
+		if cerr := identity.Check(proof, d, body); cerr != nil {
+			out.ProofError = cerr.Error()
+		} else {
+			out.Proof = proof
+		}
+	}
+	return out, nil
 }
 
 // clientFor builds a single-use client pinned to this domain's authority. A
