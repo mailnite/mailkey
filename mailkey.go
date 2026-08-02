@@ -344,6 +344,13 @@ type Peer struct {
 	LastVerifiedAt time.Time
 	NextRefreshAt  time.Time
 	LastError      string
+	// Issues is the bounded, coalesced review history: what has gone wrong with
+	// this domain, how often, and when it last happened (spec 07 §12 P4).
+	//
+	// Separate from LastError, which holds only the most recent prose and is
+	// therefore useless for review: it cannot say whether a condition happened
+	// once or ten thousand times, and a later unrelated failure erases it.
+	Issues []PeerIssue
 	// AuthorityUnstable marks a domain whose authority alternates between
 	// different valid manifests. MKDP1 refuses to invent a tie-break rule, so
 	// this surfaces as a warning for a human instead.
@@ -474,6 +481,22 @@ type Store interface {
 	// RecordFailure stores a resolution error without disturbing a manifest
 	// that is still valid.
 	RecordFailure(ctx context.Context, domain string, err error) error
+
+	// RecordIssue folds one occurrence of a reviewable condition into the
+	// peer's bounded issue history (see CoalesceIssue), and reports whether
+	// this is its FIRST occurrence.
+	//
+	// That boolean is what keeps alerting sane: the same condition repeats on
+	// every retry and every message, and an operator must hear about it once
+	// per domain per condition. Returning it from the store rather than
+	// computing it above is deliberate — only the store sees the read and the
+	// write as one operation, so two concurrent sends cannot both conclude
+	// they were first.
+	RecordIssue(ctx context.Context, domain string, code IssueCode, detail string) (bool, error)
+
+	// ClearIssue removes a condition that no longer holds, so a recurrence is
+	// reported as news rather than folded into a months-old row.
+	ClearIssue(ctx context.Context, domain string, code IssueCode) error
 	// SetPolicy applies an administrative policy.
 	SetPolicy(ctx context.Context, domain string, p Policy) error
 	// ForgetPeer deletes cached manifests and observations. It is not a

@@ -9,6 +9,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,12 @@ type Service struct {
 	// onDrop observes triggers dropped by a full queue — the signal that a
 	// storm is being shed rather than silently disappearing. Optional.
 	onDrop func(domain string)
+	// onAlert fires the FIRST time a reviewable condition appears on a domain,
+	// and only for the conditions an operator can act on (IssueCode.Alerts).
+	// Once per domain per condition, never once per message: the host turns
+	// this into a notification, and one that fires on every retry is one that
+	// gets dismissed unread. Optional.
+	onAlert func(domain string, code mailkey.IssueCode, detail string)
 
 	queue   chan string
 	wg      sync.WaitGroup
@@ -69,6 +76,11 @@ type Options struct {
 	Now func() time.Time
 	// OnError receives background resolution failures.
 	OnError func(domain string, err error)
+	// OnAlert receives the first occurrence of an actionable condition on a
+	// domain — held mail, a changed signer, a withheld pin, a blocked
+	// downgrade. Spec 07 §12 P4: these are worth waking someone for; an
+	// unsigned domain is not.
+	OnAlert func(domain string, code mailkey.IssueCode, detail string)
 	// OnDrop receives domains whose trigger was dropped by a full queue, or
 	// whose observation was refused admission.
 	OnDrop func(domain string)
@@ -95,7 +107,7 @@ func NewService(r mailkey.Resolver, s mailkey.Store, opts Options) *Service {
 	}
 	svc := &Service{
 		resolver: r, store: s, now: opts.Now,
-		onError: opts.OnError, onDrop: opts.OnDrop,
+		onError: opts.OnError, onDrop: opts.OnDrop, onAlert: opts.OnAlert,
 		queue:   make(chan string, opts.QueueSize),
 		stopped: make(chan struct{}),
 		pending: map[string]struct{}{},
@@ -480,6 +492,12 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 		if ferr := s.store.RecordFailure(ctx, d, err); ferr != nil {
 			return mailkey.Result{}, ferr
 		}
+		// On the domain's record too, coded and counted — but NOT alerted: an
+		// unreachable authority is ordinary internet weather, and there is
+		// nothing an operator here can do about someone else's outage.
+		// IssueRefreshFailed.Alerts() is false, so raise records and stays
+		// quiet. Visible on review, silent in the bell.
+		s.raise(ctx, d, mailkey.IssueRefreshFailed, err.Error())
 		return mailkey.Result{}, err
 	}
 	/*
@@ -509,6 +527,10 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 		if ferr := s.store.RecordFailure(ctx, d, xerrors.New(verdict.Alert)); ferr != nil && s.onError != nil {
 			s.onError(d, ferr)
 		}
+		// The refusal goes on the DOMAIN's record, coded, because that is where
+		// an operator will look for it and because the same refusal repeats on
+		// every send until somebody acts.
+		s.raise(ctx, d, issueOf(verdict.Reason), verdict.Alert)
 		if s.onError != nil {
 			s.onError(d, xerrors.Errorf("identity refused (%s): %s", verdict.Reason, verdict.Alert))
 		}
@@ -525,7 +547,64 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 	if err := s.store.InstallManifest(ctx, d, res); err != nil {
 		return mailkey.Result{}, err
 	}
+	// The domain resolved and its identity was accepted, so whatever was wrong
+	// with it no longer is. Clearing matters as much as recording: a stale row
+	// makes the review list a graveyard, and a condition that recurs after a
+	// clear is reported as news rather than folded into a months-old count.
+	for _, c := range []mailkey.IssueCode{
+		mailkey.IssueSignerChanged, mailkey.IssueProofMissing, mailkey.IssuePinWithheld,
+		mailkey.IssueReplay, mailkey.IssueRefreshFailed, mailkey.IssueDowngradeBlocked,
+	} {
+		if err := s.store.ClearIssue(ctx, d, c); err != nil && s.onError != nil {
+			s.onError(d, xerrors.Errorf("clear issue %s: %w", c, err))
+		}
+	}
 	return res, nil
+}
+
+/*
+raise records one reviewable condition and tells the operator the FIRST time it
+happens, and only then.
+
+The store decides "first" under its own lock, because two concurrent sends to a
+newly broken domain must not both conclude they were first and both alert. This
+function's whole job is to make sure nothing else is tempted to compute it.
+*/
+func (s *Service) raise(ctx context.Context, domain string, code mailkey.IssueCode, detail string) {
+	first, err := s.store.RecordIssue(ctx, domain, code, detail)
+	if err != nil {
+		if s.onError != nil {
+			s.onError(domain, xerrors.Errorf("record issue %s: %w", code, err))
+		}
+		return
+	}
+	if first && code.Alerts() && s.onAlert != nil {
+		s.onAlert(domain, code, detail)
+	}
+}
+
+/*
+issueOf maps an identity verdict's matrix row to the condition an operator
+reviews.
+
+The verdict's Reason is already a stable identifier — "the matrix row that
+produced this verdict" — so this is a translation between two enumerations, not
+a parse of prose. The default is the withheld pin rather than something
+alarming: an unrecognised refusal means this build met a matrix row it does not
+know, and inventing "your authority was compromised" from that would be worse
+than saying trust was not established.
+*/
+func issueOf(reason string) mailkey.IssueCode {
+	switch {
+	case strings.HasPrefix(reason, "replay/"):
+		return mailkey.IssueReplay
+	case reason == "pinned/valid-proof-other-signer":
+		return mailkey.IssueSignerChanged
+	case reason == "pinned/proof-absent-or-invalid":
+		return mailkey.IssueProofMissing
+	default:
+		return mailkey.IssuePinWithheld
+	}
 }
 
 // resultOf rebuilds a Result from a cached record. The stored canonical bytes

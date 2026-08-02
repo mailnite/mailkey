@@ -124,6 +124,34 @@ func (s *MemStore) RecordFailure(_ context.Context, domain string, ferr error) e
 	return nil
 }
 
+// RecordIssue folds one occurrence under the lock, so "was this the first?" is
+// decided by the same critical section that writes it. Two concurrent sends to
+// a newly broken domain must not both conclude they were first and both alert.
+func (s *MemStore) RecordIssue(_ context.Context, domain string, code mailkey.IssueCode, detail string) (bool, error) {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.upsertLocked(d)
+	issues, first := mailkey.CoalesceIssue(p.Issues, code, detail, s.now())
+	p.Issues = issues
+	return first, nil
+}
+
+func (s *MemStore) ClearIssue(_ context.Context, domain string, code mailkey.IssueCode) error {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.upsertLocked(d)
+	p.Issues = mailkey.ClearIssue(p.Issues, code)
+	return nil
+}
+
 func (s *MemStore) SetPolicy(_ context.Context, domain string, policy mailkey.Policy) error {
 	d, err := discovery.Normalize(domain)
 	if err != nil {
