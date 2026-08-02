@@ -512,7 +512,15 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 		if s.onError != nil {
 			s.onError(d, xerrors.Errorf("identity refused (%s): %s", verdict.Reason, verdict.Alert))
 		}
-		return mailkey.Result{}, mailkey.FailRequired(d, xerrors.New(verdict.Alert))
+		// Wrapped with the narrower sentinel when a key exists and only its
+		// SIGNER was refused, so a surface can tell "encrypt to an unpinned
+		// identity?" from "there is nothing to encrypt to" without reading the
+		// message.
+		cause := xerrors.New(verdict.Alert)
+		if res.Proof != nil {
+			cause = xerrors.Errorf("%w: %s", mailkey.ErrIdentityRefused, verdict.Alert)
+		}
+		return mailkey.Result{}, mailkey.FailRequired(d, cause)
 	}
 	if err := s.store.InstallManifest(ctx, d, res); err != nil {
 		return mailkey.Result{}, err

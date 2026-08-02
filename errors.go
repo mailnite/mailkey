@@ -97,6 +97,23 @@ var (
 	// caller must translate it into "try again later", never into a bounce, and
 	// never into sending in cleartext.
 	ErrEncryptionRequired = errors.New("mailkey: this domain requires encryption and no usable key is available")
+
+	/*
+		ErrIdentityRefused narrows ErrEncryptionRequired: a usable, WebPKI-valid
+		manifest EXISTS, and it was refused because its signer is not the
+		identity pinned for this domain.
+
+		The distinction matters to a sender-facing surface and to nothing else.
+		Proceeding past this still encrypts — to an unpinned identity, which is
+		legacy MKDP1 security and a decision a person may reasonably be offered.
+		Proceeding past the other kind of hold, where no key exists at all, means
+		CLEARTEXT to a domain that has been encrypting, and no per-message
+		override may offer that.
+
+		A sentinel rather than a message a caller reads: classifying a refusal by
+		matching prose is how a wording change becomes a security change.
+	*/
+	ErrIdentityRefused = errors.New("mailkey: the authority's signing identity is not the pinned one")
 )
 
 // requiredError reports ErrEncryptionRequired while preserving the underlying

@@ -794,6 +794,14 @@ fires routinely is an alert that gets ignored. Held mail, a pinned domain whose
 authority changed signer, and a withheld pin are worth waking someone for. An
 unsigned domain is not — it is the majority of the internet.
 
+*What the SENDER and the READER are told.* An implementation SHOULD show, per
+message, what actually happened to it — and MUST NOT present confidentiality as
+authenticity. A message that arrived sealed was sealed with the receiving
+domain's PUBLISHED key, which anyone may use; it proves nobody in between could
+read it and proves nothing about who sent it. Any single indicator combining the
+two MUST take the weaker of them, and the detail MUST be available: a grade that
+averages a strong fact with a weak one reports neither.
+
 *Two operations, not one.* Clearing cached manifests so a domain can be
 rediscovered is hygiene and MUST preserve the capability latch. Clearing the
 latch is a security decision that re-permits plaintext and MUST be a separate,
