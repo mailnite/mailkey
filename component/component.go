@@ -214,6 +214,10 @@ func (t *ServiceBean) ResolveForEncryption(ctx context.Context, domain string) (
 	return t.service.ResolveForEncryption(ctx, domain)
 }
 
+func (t *ServiceBean) ResolveAcceptingUnpinned(ctx context.Context, domain string) (mailkey.Result, error) {
+	return t.service.ResolveAcceptingUnpinned(ctx, domain)
+}
+
 func (t *ServiceBean) Forget(ctx context.Context, domain string) error {
 	return t.service.Forget(ctx, domain)
 }

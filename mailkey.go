@@ -556,6 +556,15 @@ type Service interface {
 	// returns ErrNoKey when the domain has no usable key, which the caller
 	// interprets according to the peer's policy.
 	ResolveForEncryption(ctx context.Context, domain string) (Result, error)
+	// ResolveAcceptingUnpinned is ResolveForEncryption for a sender who was
+	// asked and said yes: a manifest refused ONLY because its signer is not the
+	// pinned one is returned rather than withheld.
+	//
+	// It cannot produce cleartext. Where there is no key — the capability latch
+	// — there is nothing for it to return, so "proceed means plaintext" is not
+	// a case a caller has to remember to exclude. It also does not install what
+	// it returns: the pin is unchanged and the next message asks again.
+	ResolveAcceptingUnpinned(ctx context.Context, domain string) (Result, error)
 	// Forget removes cached state for a domain.
 	Forget(ctx context.Context, domain string) error
 }

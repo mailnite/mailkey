@@ -141,7 +141,7 @@ func (s *Service) worker() {
 			// A background resolution gets its own bounded context: it must not
 			// inherit the lifetime of whatever inbound message triggered it.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if _, err := s.resolve(ctx, d, false); err != nil && s.onError != nil {
+			if _, err := s.resolve(ctx, d, false, false); err != nil && s.onError != nil {
 				s.onError(d, err)
 			}
 			cancel()
@@ -331,7 +331,7 @@ func (s *Service) Refresh(ctx context.Context, domain string) (mailkey.Peer, err
 }
 
 func (s *Service) refresh(ctx context.Context, d string) (mailkey.Peer, error) {
-	_, rerr := s.resolve(ctx, d, true)
+	_, rerr := s.resolve(ctx, d, true, false)
 	p, err := s.store.GetPeer(ctx, d)
 	if err != nil {
 		return mailkey.Peer{}, err
@@ -353,7 +353,33 @@ func (s *Service) refresh(ctx context.Context, d string) (mailkey.Peer, error) {
 // configuration) decides between holding, failing and sending in the clear —
 // so a transient failure cannot silently downgrade a domain that has been
 // encrypted before.
+/*
+ResolveAcceptingUnpinned is ResolveForEncryption for a sender who has been asked
+and said yes.
+
+"Proceed" is not one thing (spec 07 §12 P4). Past an IDENTITY refusal it means
+encrypting to a manifest that is still WebPKI-authenticated, merely not signed by
+the identity we pinned — legacy MKDP1 security, and a defensible choice while a
+peer rolls signing out. Past the capability latch it would mean CLEARTEXT to a
+domain that has been encrypting for months, and no per-message override may ever
+offer that. This function can only do the first: with no key there is nothing for
+it to return, so the distinction is structural rather than a check someone must
+remember to write.
+
+What it deliberately does NOT do is install the manifest. The pin is unchanged,
+the refusal stays on the domain's record, and the next message asks again. An
+override is a decision about one message; making it stick would turn a sender in
+a hurry into an administrator.
+*/
+func (s *Service) ResolveAcceptingUnpinned(ctx context.Context, domain string) (mailkey.Result, error) {
+	return s.resolveEncrypting(ctx, domain, true)
+}
+
 func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mailkey.Result, error) {
+	return s.resolveEncrypting(ctx, domain, false)
+}
+
+func (s *Service) resolveEncrypting(ctx context.Context, domain string, acceptUnpinned bool) (mailkey.Result, error) {
 	// Normalization is the one failure that stays outside the policy wrapper: a
 	// domain we cannot even parse has no peer, no latch and no protection to
 	// lose, and holding mail for it would turn a malformed address into stuck
@@ -362,7 +388,7 @@ func (s *Service) ResolveForEncryption(ctx context.Context, domain string) (mail
 	if err != nil {
 		return mailkey.Result{}, err
 	}
-	res, p, rerr := s.resolveForEncryption(ctx, d)
+	res, p, rerr := s.resolveForEncryption(ctx, d, acceptUnpinned)
 	if rerr != nil {
 		return mailkey.Result{}, s.policyFailure(ctx, p, d, rerr)
 	}
@@ -386,7 +412,7 @@ them impossible does. A new error path added inside this function is
 policy-checked automatically, whether or not whoever adds it has read this
 comment.
 */
-func (s *Service) resolveForEncryption(ctx context.Context, d string) (mailkey.Result, *mailkey.Peer, error) {
+func (s *Service) resolveForEncryption(ctx context.Context, d string, acceptUnpinned bool) (mailkey.Result, *mailkey.Peer, error) {
 	p, err := s.store.GetPeer(ctx, d)
 	if err != nil {
 		// A store that cannot answer is not evidence that this domain does not
@@ -409,13 +435,13 @@ func (s *Service) resolveForEncryption(ctx context.Context, d string) (mailkey.R
 		}
 		// Due for refresh but still usable: try, and fall back to the cache if
 		// the authority is unreachable. A working key beats a fresh error.
-		if res, rerr := s.resolve(ctx, d, false); rerr == nil {
+		if res, rerr := s.resolve(ctx, d, false, acceptUnpinned); rerr == nil {
 			return res, p, nil
 		}
 		res, cerr := resultOf(rec, p.Domain)
 		return res, p, cerr
 	}
-	res, rerr := s.resolve(ctx, d, false)
+	res, rerr := s.resolve(ctx, d, false, acceptUnpinned)
 	return res, p, rerr
 }
 
@@ -474,7 +500,7 @@ func (s *Service) Forget(ctx context.Context, domain string) error {
 // resolve performs one resolution and records the outcome. force skips the
 // "already valid" shortcut; the resolver itself coalesces concurrent calls, so
 // two callers racing here cost one request.
-func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Result, error) {
+func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned bool) (mailkey.Result, error) {
 	if !force {
 		if p, err := s.store.GetPeer(ctx, d); err == nil && p != nil {
 			if p.Policy == mailkey.PolicyDisabled {
@@ -534,12 +560,25 @@ func (s *Service) resolve(ctx context.Context, d string, force bool) (mailkey.Re
 		if s.onError != nil {
 			s.onError(d, xerrors.Errorf("identity refused (%s): %s", verdict.Reason, verdict.Alert))
 		}
-		// Wrapped with the narrower sentinel when a key exists and only its
-		// SIGNER was refused, so a surface can tell "encrypt to an unpinned
-		// identity?" from "there is nothing to encrypt to" without reading the
-		// message.
+		if acceptUnpinned && overridable(verdict.Reason, res) {
+			/*
+				The sender was asked and said yes.
+
+				This returns a manifest that is WebPKI-authenticated and NOT
+				installed: the pin is untouched, the issue stays on the domain's
+				record, and the next message asks again. An override is a
+				decision about one message, and letting it stick would turn a
+				sender in a hurry into an administrator.
+			*/
+			return res, nil
+		}
+		// Wrapped with the narrower sentinel under the SAME predicate, so what a
+		// surface is allowed to offer and what this function is willing to do
+		// can never drift apart. Before they shared one rule, a replayed
+		// manifest was wrapped as an identity refusal and would have been
+		// offered to a sender as "send anyway".
 		cause := xerrors.New(verdict.Alert)
-		if res.Proof != nil {
+		if overridable(verdict.Reason, res) {
 			cause = xerrors.Errorf("%w: %s", mailkey.ErrIdentityRefused, verdict.Alert)
 		}
 		return mailkey.Result{}, mailkey.FailRequired(d, cause)
@@ -581,6 +620,26 @@ func (s *Service) raise(ctx context.Context, domain string, code mailkey.IssueCo
 	if first && code.Alerts() && s.onAlert != nil {
 		s.onAlert(domain, code, detail)
 	}
+}
+
+/*
+overridable reports whether a refusal may be proceeded past by a sender who
+explicitly accepts an unpinned identity.
+
+Two conditions, and each rules out a different disaster.
+
+A PROOF must exist. Without one there is no WebPKI-authenticated manifest to
+encrypt to, so "proceed" could only mean cleartext — which the capability latch
+exists to forbid and which no per-message override may offer.
+
+And the refusal must not be a REPLAY. A replayed manifest is a real, validly
+signed one; that is what makes it dangerous. It names a key we have already
+superseded, quite possibly because it was compromised, and an attacker who can
+serve it only needs the sender to click "send anyway" once. A pin disagreement is
+a question a human can reasonably answer; a rollback is not.
+*/
+func overridable(reason string, res mailkey.Result) bool {
+	return res.Proof != nil && !strings.HasPrefix(reason, "replay/")
 }
 
 /*
