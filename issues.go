@@ -59,6 +59,16 @@ const (
 	// IssueRefreshFailed: discovery failed. The mildest condition here and the
 	// most common — an unreachable authority is ordinary internet weather.
 	IssueRefreshFailed IssueCode = "refresh-failed"
+	// IssueForeignSeal is recorded against one of OUR OWN domains, not a peer:
+	// a message arrived sealed to a key this server has never held. Within the
+	// retention floor that means a correspondent was served a manifest we never
+	// published — someone is impersonating our authority — or we lost a key we
+	// advertised. The envelope-derived interception detector.
+	IssueForeignSeal IssueCode = "foreign-seal"
+	// IssueRevoked: the domain's pinned identity was withdrawn by a valid
+	// revocation statement with no successor. Mail holds; only a human decides
+	// what to trust next.
+	IssueRevoked IssueCode = "revoked"
 )
 
 /*
@@ -76,7 +86,10 @@ on the peer's record either way; this only decides what pushes.
 */
 func (c IssueCode) Alerts() bool {
 	switch c {
-	case IssueSignerChanged, IssuePinWithheld, IssueDowngradeBlocked, IssueMailHeld, IssueProofMissing:
+	case IssueSignerChanged, IssuePinWithheld, IssueDowngradeBlocked, IssueMailHeld, IssueProofMissing,
+		// A forged manifest in circulation, and an identity formally withdrawn:
+		// each is the exact situation its machinery exists to catch.
+		IssueForeignSeal, IssueRevoked:
 		// ProofMissing only arises for a domain that is already PINNED, which
 		// means an operator has decided they care about it. A pinned peer that
 		// stops signing is precisely what they pinned it to be told about.

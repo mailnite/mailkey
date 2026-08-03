@@ -264,6 +264,12 @@ func ApplyIdentity(st mailkey.IdentityState, v Verdict, res mailkey.Result, now 
 		st.Fingerprint = v.Pin
 		st.PinnedAt = now
 		st.Contested = ""
+		// The KEY travels with the pin, because the fingerprint alone cannot
+		// verify the first link of a rotation chain. Only when the proof is the
+		// identity being pinned — a mismatched pair must store nothing.
+		if res.Proof != nil && res.Proof.Fingerprint == v.Pin {
+			st.PinnedPublicKey = append([]byte(nil), res.Proof.PublicKey...)
+		}
 	case v.Status == mailkey.IdentityContested:
 		// Withheld, not weakened: an existing pin is never demoted by DNS.
 		if st.Status != mailkey.IdentityPinned {

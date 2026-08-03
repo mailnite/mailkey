@@ -138,7 +138,7 @@ func TestOnlyActionableConditionsAlert(t *testing.T) {
 		mailkey.IssueDowngradeBlocked, mailkey.IssueMailHeld,
 		// Only ever raised for an already-PINNED domain, so it is never the
 		// routine case: the operator pinned it to hear exactly this.
-		mailkey.IssueProofMissing,
+		mailkey.IssueProofMissing, mailkey.IssueForeignSeal, mailkey.IssueRevoked,
 	} {
 		if !c.Alerts() {
 			t.Errorf("%s is worth waking someone for and does not alert", c)

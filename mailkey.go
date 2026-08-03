@@ -388,7 +388,17 @@ type IdentityState struct {
 	// Fingerprint is the PINNED signing identity, set only when Status is
 	// IdentityPinned.
 	Fingerprint Fingerprint
-	PinnedAt    time.Time
+	/*
+		PinnedPublicKey is the pinned identity's Ed25519 public key — kept
+		because a fingerprint alone cannot FOLLOW a rotation. A transition
+		statement carries only the NEW key; its old_signature is verified
+		against the key the verifier already trusts, and a verifier that stored
+		only the hash of that key would be unable to check the very first link
+		of any chain. Pins established before this field existed have it empty,
+		and for them a signer change remains an operator decision.
+	*/
+	PinnedPublicKey []byte
+	PinnedAt        time.Time
 	// EverHTTPSValidated records that this domain has answered at least one
 	// successful HTTPS authority fetch. It never returns to false.
 	EverHTTPSValidated bool
@@ -567,6 +577,41 @@ type Service interface {
 	ResolveAcceptingUnpinned(ctx context.Context, domain string) (Result, error)
 	// Forget removes cached state for a domain.
 	Forget(ctx context.Context, domain string) error
+}
+
+/*
+IdentityChainResolver is the sender-side fetch of the §4.2 identity resource.
+
+A separate, optional interface rather than a method on Resolver, because the two
+fetches happen on different occasions and a Resolver that predates identity
+signing remains complete: manifests resolve per send, the chain is fetched only
+when a pinned domain's signer CHANGES — the one moment the history can answer a
+question the manifest cannot.
+
+The bytes come back raw and unparsed. Parsing and — above all — verification
+belong to the caller walking the chain from its own pin: a resolver that
+returned a parsed, "checked" document would be one refactor away from someone
+trusting its check.
+*/
+type IdentityChainResolver interface {
+	ResolveIdentityChain(ctx context.Context, domain string) ([]byte, error)
+}
+
+/*
+IdentityPublisher is the OPTIONAL second half of publishing: the identity
+resource of spec 07 §4.2, served beside the manifest endpoint.
+
+Separate from Publisher because the two documents have opposite lifetimes — a
+manifest is re-issued routinely, an identity document changes only on rotation —
+and because a publisher without identity signing is a legitimate MKDP1 server
+that must keep working unchanged. A handler type-asserts for this and serves 404
+when it is absent, exactly as a server that never signed would.
+*/
+type IdentityPublisher interface {
+	// CurrentIdentityDoc returns the canonical identity document for a hosted
+	// domain — active key, status, rotation chain — or ok=false when the domain
+	// publishes no identity.
+	CurrentIdentityDoc(domain string) ([]byte, bool)
 }
 
 // KeyHandle is an opaque reference to a private key: raw bytes for a software

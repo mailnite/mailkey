@@ -41,6 +41,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -450,4 +451,81 @@ func classifyTransportError(domain string, err error) error {
 		return mailkey.Fail(mailkey.FailureTLS, domain, err)
 	}
 	return mailkey.Fail(mailkey.FailureNetwork, domain, err)
+}
+
+/*
+ResolveIdentityChain implements mailkey.IdentityChainResolver: the hardened
+fetch of https://mail.<d>/.well-known/mail-key-identity.
+
+Every protection the manifest fetch has applies unchanged — the derived
+authority host, WebPKI validation with the pinned ServerName, the concurrency
+semaphore, the declared-length check before a byte is read — because this
+resource moves TRUST ANCHORS, and a fetch of it deserves nothing less than the
+fetch it exists to explain. The one difference is the size bound: a chain is
+bigger than a manifest, so the cap is the §5.2 chain bound rather than the
+manifest's.
+
+The body is returned raw. The caller walks it from its own pin; nothing here
+vouches for anything.
+*/
+func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain string) ([]byte, error) {
+	d, err := discovery.Normalize(domain)
+	if err != nil {
+		return nil, mailkey.Fail(mailkey.FailurePolicy, domain, err)
+	}
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	case <-ctx.Done():
+		return nil, mailkey.Fail(mailkey.FailureNetwork, d, ctx.Err())
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
+	defer cancel()
+
+	host, err := discovery.AuthorityHost(d)
+	if err != nil {
+		return nil, mailkey.Fail(mailkey.FailurePolicy, d, err)
+	}
+	u := &url.URL{Scheme: "https", Host: host, Path: identity.ResourcePath}
+	if r.port != authorityPort {
+		u.Host = net.JoinHostPort(host, r.port)
+	}
+	client := r.clientFor(d, host)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, mailkey.Fail(mailkey.FailurePolicy, d, err)
+	}
+	req.Header.Set("Accept", mailkey.MediaType)
+	req.Header.Set("User-Agent", r.opts.UserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, classifyTransportError(d, err)
+	}
+	defer func() {
+		_, _ = io.CopyN(io.Discard, resp.Body, 1<<10)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		// 404 is the ordinary answer of a domain that signs but has never
+		// rotated an identity resource into existence, and of software that
+		// predates the resource. Not an alarm — the caller's refusal stands.
+		return nil, mailkey.Failf(mailkey.FailureAbsent, d, "no identity resource: %d", resp.StatusCode)
+	}
+	if resp.ContentLength > int64(identity.MaxChainBytes) {
+		return nil, mailkey.Failf(mailkey.FailureHTTP, d,
+			"the identity resource declares %d bytes, over the %d byte limit", resp.ContentLength, identity.MaxChainBytes)
+	}
+	if err := checkMediaType(resp.Header.Get("Content-Type")); err != nil {
+		return nil, mailkey.Fail(mailkey.FailureHTTP, d, err)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(identity.MaxChainBytes)+1))
+	if err != nil {
+		return nil, classifyTransportError(d, err)
+	}
+	if len(body) > identity.MaxChainBytes {
+		return nil, mailkey.Failf(mailkey.FailureHTTP, d,
+			"the identity resource exceeds the %d byte limit", identity.MaxChainBytes)
+	}
+	return body, nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/discovery"
+	"github.com/mailnite/mailkey/identity"
 	"golang.org/x/xerrors"
 )
 
@@ -550,6 +551,22 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 		s.onError(d, xerrors.Errorf("capability latch: %w", err))
 	}
 	if !verdict.Encrypt {
+		/*
+			A pinned domain answering under a DIFFERENT valid identity is the one
+			refusal the published history can settle: a legitimate rotation left
+			a signed old→new transition behind (§5), and walking it from OUR pin
+			turns "stranger" into "successor" with no human involved. That walk
+			happens here — before the refusal is recorded — because its success
+			is not a refusal at all.
+
+			Every other refusal reason stays a refusal. A chain cannot excuse a
+			missing proof or a replay; it can only explain a signer change.
+		*/
+		if verdict.Reason == "pinned/valid-proof-other-signer" {
+			if res2, ok := s.followRotation(ctx, d, prev, res); ok {
+				return res2, nil
+			}
+		}
 		if ferr := s.store.RecordFailure(ctx, d, xerrors.New(verdict.Alert)); ferr != nil && s.onError != nil {
 			s.onError(d, ferr)
 		}
@@ -599,6 +616,91 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 		}
 	}
 	return res, nil
+}
+
+/*
+followRotation walks a domain's published identity history from OUR pin toward
+the signer we just observed.
+
+The rules that make it safe to run unattended:
+
+  - It starts from the LOCAL pin and the LOCALLY STORED public key. A pin
+    recorded before the key was kept alongside cannot verify the first link, and
+    for such peers the walk declines — the refusal stands and a human decides,
+    which is exactly what happened before this function existed.
+  - It must ARRIVE at the observed signer. A valid chain ending anywhere else
+    explains nothing about the manifest in hand and moves nothing.
+  - A REVOKED terminus holds the mail and files IssueRevoked. "This identity was
+    withdrawn" is the one thing a chain can say that is worse than "stranger".
+  - Success moves the pin THROUGH the store and installs the manifest, so the
+    next send takes the ordinary pinned path with no memory of the excursion.
+*/
+func (s *Service) followRotation(ctx context.Context, d string, prev *mailkey.Peer, res mailkey.Result) (mailkey.Result, bool) {
+	cr, ok := s.resolver.(mailkey.IdentityChainResolver)
+	if !ok || prev == nil || len(prev.Identity.PinnedPublicKey) == 0 || res.Proof == nil {
+		return mailkey.Result{}, false
+	}
+	raw, err := cr.ResolveIdentityChain(ctx, d)
+	if err != nil {
+		if s.onError != nil {
+			s.onError(d, xerrors.Errorf("identity chain: %w", err))
+		}
+		return mailkey.Result{}, false
+	}
+	doc, err := identity.ParseDoc(d, raw)
+	if err != nil {
+		if s.onError != nil {
+			s.onError(d, xerrors.Errorf("identity chain: %w", err))
+		}
+		return mailkey.Result{}, false
+	}
+	walk, err := identity.WalkChain(prev.Identity.Fingerprint, prev.Identity.PinnedPublicKey, doc.Chain, s.now())
+	if err != nil {
+		// A link CLAIMING descent from our pin that does not verify is not a
+		// gap in the chain — it is a forgery or corruption, and it is recorded
+		// where the operator reviews this domain.
+		s.raise(ctx, d, mailkey.IssueSignerChanged, "identity chain did not verify: "+err.Error())
+		return mailkey.Result{}, false
+	}
+	if walk.Revoked {
+		s.raise(ctx, d, mailkey.IssueRevoked, "the pinned identity was revoked: "+walk.Reason)
+		return mailkey.Result{}, false
+	}
+	if walk.Applied == 0 || walk.Fingerprint != res.Proof.Fingerprint {
+		// The history never reaches the signer we observed. Whatever this is,
+		// it is not the rotation it would need to be.
+		return mailkey.Result{}, false
+	}
+	st := identityOf(prev)
+	st.Status = mailkey.IdentityPinned
+	st.Fingerprint = walk.Fingerprint
+	st.PinnedPublicKey = append([]byte(nil), walk.PublicKey...)
+	st.PinnedAt = s.now()
+	st.Contested = ""
+	if !res.Manifest.IssuedAt.IsZero() && res.Manifest.IssuedAt.After(st.LastVerifiedIssuedAt) {
+		st.LastVerifiedIssuedAt = res.Manifest.IssuedAt
+		st.LastVerifiedManifestID = res.ManifestID
+	}
+	if err := s.store.SetIdentity(ctx, d, st); err != nil {
+		if s.onError != nil {
+			s.onError(d, xerrors.Errorf("identity state: %w", err))
+		}
+		return mailkey.Result{}, false
+	}
+	if err := s.store.InstallManifest(ctx, d, res); err != nil {
+		return mailkey.Result{}, false
+	}
+	for _, c := range []mailkey.IssueCode{mailkey.IssueSignerChanged, mailkey.IssueProofMissing, mailkey.IssueMailHeld} {
+		if cerr := s.store.ClearIssue(ctx, d, c); cerr != nil && s.onError != nil {
+			s.onError(d, cerr)
+		}
+	}
+	if s.onError != nil {
+		// Informational by design: the operator sees the rotation in the log,
+		// but nobody is woken for a transition the OLD key itself authorized.
+		s.onError(d, xerrors.Errorf("identity rotated: pin moved to %s by a signed transition", encodeFP(walk.Fingerprint)))
+	}
+	return res, true
 }
 
 /*

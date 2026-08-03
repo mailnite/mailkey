@@ -24,6 +24,7 @@ the server that owns the keys.
 package wellknown
 
 import (
+	"crypto/sha256"
 	"net/http"
 	"strconv"
 	"time"
@@ -100,6 +101,10 @@ func (t *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if t.Publisher == nil {
 		t.miss(w)
+		return
+	}
+	if r.URL.Path == identity.ResourcePath {
+		t.serveIdentity(w, r)
 		return
 	}
 	pub, ok := t.lookup(r.Host)
@@ -206,4 +211,55 @@ func trimSpace(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+/*
+serveIdentity answers the §4.2 identity resource: the active signing identity
+and the rotation chain a pinned correspondent walks.
+
+Served only when the Publisher also publishes identities; otherwise 404, which
+is byte-for-byte what a server that never signed answers — so "this domain does
+not sign" and "this software predates signing" stay indistinguishable, and the
+endpoint is not a version fingerprint.
+
+Moderate caching with a strong ETag, exactly as the spec asks: the document
+changes only on rotation, and the hash of its bytes is an honest validator for
+the same reason the manifest id is.
+*/
+func (t *Handler) serveIdentity(w http.ResponseWriter, r *http.Request) {
+	ip, ok := t.Publisher.(mailkey.IdentityPublisher)
+	if !ok {
+		t.miss(w)
+		return
+	}
+	var raw []byte
+	found := false
+	for _, d := range discovery.DomainCandidatesOf(r.Host) {
+		if b, ok := ip.CurrentIdentityDoc(d); ok && len(b) > 0 {
+			raw, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.miss(w)
+		return
+	}
+	sum := sha256.Sum256(raw)
+	etag := `"` + manifest.EncodeID(sum) + `"`
+	h := w.Header()
+	h.Set("ETag", etag)
+	h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(t.maxAge().Seconds())))
+	h.Set("Content-Type", mailkey.MediaType)
+	h.Set("X-Content-Type-Options", "nosniff")
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	h.Set("Content-Length", strconv.Itoa(len(raw)))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
