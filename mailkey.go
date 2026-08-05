@@ -64,6 +64,17 @@ const Version = "MKDP1"
 // Mode is the only discovery mode in MKDP1: resolve over HTTPS.
 const Mode = "https"
 
+// SubjectQueryParam is the query parameter naming the SUBJECT domain on every
+// authority fetch (?d=…). It is sent on every request — self-hosted included —
+// so one host can serve many domains' manifests (delegated authority) with a
+// single uniform request shape.
+const SubjectQueryParam = "d"
+
+// MaxAuthorityEntries bounds the manifest's signed authority sequence. Two is
+// the working need (a primary-domain switch keeps both generations green);
+// four leaves headroom without opening an amplification list.
+const MaxAuthorityEntries = 4
+
 // HeaderName is the mail header that advertises MKDP1 capability.
 const HeaderName = "Mail-Key"
 
@@ -194,6 +205,21 @@ type Manifest struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	Key       KeyDescriptor
+	// Authority is the domain's CONSENT to be served elsewhere: the authority
+	// domains whose mail hosts may serve this manifest. Empty means only the
+	// domain's own host may (the self-hosted default).
+	//
+	// It is inside the signed, id-hashed bytes on purpose. A record's a= can
+	// misroute a request; this list decides whether what comes back is
+	// acceptable — so a hostile pointer reaches a host that either 404s or
+	// returns a manifest whose consent does not name it, and a manifest
+	// stolen and re-served from elsewhere fails the same check. Delegation is
+	// thereby granted by the domain itself, never by an observation.
+	//
+	// A SEQUENCE, not a single value, because a primary-domain switch must
+	// keep both DNS generations working while zones converge: [new, old]
+	// during the transition, pruned to [new] when it completes.
+	Authority []string
 }
 
 // Source is where an observation came from. Sources have different operational
@@ -209,8 +235,15 @@ const (
 // Advertisement is a parsed observation: a claim that a domain speaks MKDP1,
 // and optionally the manifest id the observer saw. It carries no key material.
 type Advertisement struct {
-	Version    string
-	Domain     string
+	Version string
+	Domain  string
+	// Authority is the DELEGATED authority domain from the a= field — the
+	// domain whose mail host serves this domain's manifests (x-primary-domain
+	// delegation). Empty means self-hosted: the authority is Domain itself.
+	// Like every observation field it can misroute one request and nothing
+	// more: validation binds the manifest to Domain and the serving host to
+	// the manifest's own SIGNED authority list, never to this hint.
+	Authority  string
 	ManifestID ManifestID
 	HasID      bool
 	// Fingerprint is the domain's advertised signing identity. An OBSERVATION:
@@ -252,7 +285,10 @@ type Result struct {
 // construction, TLS validation, redirect refusal, transfer limits, canonical
 // parsing and manifest validation — a caller cannot opt out of any of them.
 type Resolver interface {
-	Resolve(ctx context.Context, domain string) (Result, error)
+	// authority is the delegated authority DOMAIN observed for this subject
+	// ("" = self-hosted). It selects which mail host is dialed and takes part
+	// in no trust decision.
+	Resolve(ctx context.Context, domain, authority string) (Result, error)
 }
 
 // PeerState is the lifecycle position of a Peer.
@@ -301,6 +337,11 @@ type Observation struct {
 	Source     Source
 	ManifestID ManifestID
 	HasID      bool
+	// Authority is the delegated authority domain this sighting advertised
+	// (a= — "" means self-hosted). Stored so a later resolve knows which host
+	// to ask; like every observation field it routes a request and decides
+	// nothing.
+	Authority  string
 	ObservedAt time.Time
 	Status     ObservationStatus
 	// Context is a privacy-minimized origin note (an internal message

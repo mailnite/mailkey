@@ -33,7 +33,7 @@ type stubResolver struct {
 	calls  int
 }
 
-func (s *stubResolver) Resolve(context.Context, string) (mailkey.Result, error) {
+func (s *stubResolver) Resolve(context.Context, string, string) (mailkey.Result, error) {
 	s.calls++
 	return s.result, s.err
 }
@@ -131,7 +131,7 @@ func TestResolverBeanRespectsDisabled(t *testing.T) {
 		t.Fatalf("want one mailkey.Resolver bean, got %d", len(list))
 	}
 	r := list[0].Object().(mailkey.Resolver)
-	if _, err := r.Resolve(context.Background(), domain); !errors.Is(err, mailkey.ErrDisabled) {
+	if _, err := r.Resolve(context.Background(), domain, ""); !errors.Is(err, mailkey.ErrDisabled) {
 		t.Fatalf("a disabled resolver must report ErrDisabled, got %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestPropertiesConfigureTheResolver(t *testing.T) {
 	r := ctx.Bean(mailkey.ResolverClass, 0)[0].Object().(mailkey.Resolver)
 	// An unusable domain is refused by policy before any network work, which
 	// proves the bean produced a real, validating resolver.
-	if _, err := r.Resolve(context.Background(), "localhost"); err == nil {
+	if _, err := r.Resolve(context.Background(), "localhost", ""); err == nil {
 		t.Fatal("an unusable domain must be refused")
 	} else if c := mailkey.ClassOf(err); c != mailkey.FailurePolicy {
 		t.Fatalf("class %q, want %q", c, mailkey.FailurePolicy)

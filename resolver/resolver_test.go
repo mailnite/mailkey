@@ -141,7 +141,7 @@ func TestResolveHappyPath(t *testing.T) {
 	f := newAuthority(t)
 	r := newResolver(t, f)
 
-	res, err := r.Resolve(context.Background(), "Example.COM.")
+	res, err := r.Resolve(context.Background(), "Example.COM.", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestTLSValidation(t *testing.T) {
 	// A certificate for the wrong host: valid chain, wrong name.
 	wrong := newAuthority(t, "mail.attacker.example")
 	r := newResolver(t, wrong)
-	_, err := r.Resolve(context.Background(), domain)
+	_, err := r.Resolve(context.Background(), domain, "")
 	if err == nil {
 		t.Fatal("a certificate for another host must be refused")
 	}
@@ -180,7 +180,7 @@ func TestTLSValidation(t *testing.T) {
 	// An untrusted issuer: the system pool does not know our test CA.
 	untrusted := newAuthority(t)
 	r = newResolver(t, untrusted, func(o *resolver.Options) { o.RootCAs = x509.NewCertPool() })
-	if _, err := r.Resolve(context.Background(), domain); err == nil {
+	if _, err := r.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("an untrusted issuer must be refused")
 	} else if c := mailkey.ClassOf(err); c != mailkey.FailureTLS {
 		t.Fatalf("unknown authority should be class %q, got %q (%v)", mailkey.FailureTLS, c, err)
@@ -202,7 +202,7 @@ func TestTLSValidation(t *testing.T) {
 		PortOverride:        port,
 		Timeout:             3 * time.Second,
 	})
-	if _, err := r.Resolve(context.Background(), domain); err == nil {
+	if _, err := r.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("an expired certificate must be refused")
 	} else if c := mailkey.ClassOf(err); c != mailkey.FailureTLS {
 		t.Fatalf("expired certificate should be class %q, got %q (%v)", mailkey.FailureTLS, c, err)
@@ -237,7 +237,7 @@ func TestAddressPolicy(t *testing.T) {
 			PortOverride: f.port(),
 			Timeout:      2 * time.Second,
 		})
-		_, err := r.Resolve(context.Background(), domain)
+		_, err := r.Resolve(context.Background(), domain, "")
 		if err == nil {
 			t.Errorf("%s (%s): must be refused", name, addr)
 			continue
@@ -263,10 +263,10 @@ func TestAddressPolicy(t *testing.T) {
 		PortOverride:        f.port(),
 		Timeout:             2 * time.Second,
 	})
-	if _, err := rebinding.Resolve(context.Background(), domain); err != nil {
+	if _, err := rebinding.Resolve(context.Background(), domain, ""); err != nil {
 		t.Fatalf("first resolution should succeed: %v", err)
 	}
-	_, err := rebinding.Resolve(context.Background(), "other.example")
+	_, err := rebinding.Resolve(context.Background(), "other.example", "")
 	if err == nil {
 		t.Fatal("a rebound link-local address must be refused on the next connection")
 	}
@@ -286,11 +286,11 @@ func TestPrivateTargetsOptIn(t *testing.T) {
 	strict := resolver.New(resolver.Options{
 		Lookup: f.lookupTo(), RootCAs: f.ca.pool, PortOverride: f.port(), Timeout: 2 * time.Second,
 	})
-	if _, err := strict.Resolve(context.Background(), domain); err == nil {
+	if _, err := strict.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("loopback must be refused by default")
 	}
 	permissive := newResolver(t, f) // AllowPrivateTargets: true
-	if _, err := permissive.Resolve(context.Background(), domain); err != nil {
+	if _, err := permissive.Resolve(context.Background(), domain, ""); err != nil {
 		t.Fatalf("with the opt-in, loopback must be reachable: %v", err)
 	}
 }
@@ -332,7 +332,7 @@ func TestHTTPRejections(t *testing.T) {
 		f := newAuthority(t)
 		w.setup(t, f)
 		r := newResolver(t, f)
-		_, err := r.Resolve(context.Background(), domain)
+		_, err := r.Resolve(context.Background(), domain, "")
 		if err == nil {
 			t.Errorf("%s: must be refused", name)
 			continue
@@ -363,7 +363,7 @@ func TestExpiredAndOverlongManifest(t *testing.T) {
 	f := newAuthority(t)
 	f.body = raw
 	r := newResolver(t, f)
-	if _, err := r.Resolve(context.Background(), domain); err == nil {
+	if _, err := r.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("an expired manifest must be refused")
 	} else if c := mailkey.ClassOf(err); c != mailkey.FailureProtocol {
 		t.Fatalf("class %q, want %q", c, mailkey.FailureProtocol)
@@ -378,7 +378,7 @@ func TestExpiredAndOverlongManifest(t *testing.T) {
 	f2 := newAuthority(t)
 	f2.body, _ = manifest.Pack(long)
 	r2 := newResolver(t, f2)
-	if _, err := r2.Resolve(context.Background(), domain); err == nil {
+	if _, err := r2.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("a manifest claiming a year of validity must be refused")
 	}
 }
@@ -391,7 +391,7 @@ func TestRedirectsRefused(t *testing.T) {
 		http.Redirect(w, r, "https://mail.attacker.example/.well-known/mail-key", http.StatusFound)
 	}
 	r := newResolver(t, f)
-	_, err := r.Resolve(context.Background(), domain)
+	_, err := r.Resolve(context.Background(), domain, "")
 	if err == nil {
 		t.Fatal("a redirect must be refused")
 	}
@@ -417,7 +417,7 @@ func TestSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = r.Resolve(context.Background(), domain)
+			_, errs[i] = r.Resolve(context.Background(), domain, "")
 		}(i)
 	}
 	wg.Wait()
@@ -432,7 +432,7 @@ func TestSingleFlight(t *testing.T) {
 
 	// A later resolution is a fresh request — coalescing is per burst, not a
 	// cache (caching is the Peer store's job, with the manifest's own expiry).
-	if _, err := r.Resolve(context.Background(), domain); err != nil {
+	if _, err := r.Resolve(context.Background(), domain, ""); err != nil {
 		t.Fatal(err)
 	}
 	if hits := f.hits.Load(); hits != 2 {
@@ -446,7 +446,7 @@ func TestTimeout(t *testing.T) {
 	f.delay = 2 * time.Second
 	r := newResolver(t, f, func(o *resolver.Options) { o.Timeout = 200 * time.Millisecond })
 	start := time.Now()
-	_, err := r.Resolve(context.Background(), domain)
+	_, err := r.Resolve(context.Background(), domain, "")
 	if err == nil {
 		t.Fatal("a slow authority must time out")
 	}
@@ -470,7 +470,7 @@ func TestUnusableDomains(t *testing.T) {
 		Timeout: time.Second,
 	})
 	for _, bad := range []string{"", "localhost", "127.0.0.1", "example.com:443", "https://example.com", "*.example.com"} {
-		_, err := r.Resolve(context.Background(), bad)
+		_, err := r.Resolve(context.Background(), bad, "")
 		if err == nil {
 			t.Errorf("%q must be refused", bad)
 			continue
@@ -490,7 +490,7 @@ func TestCacheLifetime(t *testing.T) {
 	f := newAuthority(t)
 	f.header["Cache-Control"] = "max-age=60, must-revalidate"
 	r := newResolver(t, f)
-	res, err := r.Resolve(context.Background(), domain)
+	res, err := r.Resolve(context.Background(), domain, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +505,7 @@ func TestCacheLifetime(t *testing.T) {
 	f2 := newAuthority(t)
 	f2.header["Cache-Control"] = "max-age=999999999"
 	r2 := newResolver(t, f2)
-	res2, err := r2.Resolve(context.Background(), domain)
+	res2, err := r2.Resolve(context.Background(), domain, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,9 +526,95 @@ func TestBodyCapEnforcedBeforeRead(t *testing.T) {
 		_, _ = w.Write(make([]byte, 1024))
 	}
 	r := newResolver(t, f)
-	if _, err := r.Resolve(context.Background(), domain); err == nil {
+	if _, err := r.Resolve(context.Background(), domain, ""); err == nil {
 		t.Fatal("an oversized declared length must be refused")
 	} else if c := mailkey.ClassOf(err); c != mailkey.FailureHTTP {
 		t.Fatalf("class %q, want %q (%v)", c, mailkey.FailureHTTP, err)
+	}
+}
+
+// delegatedManifest builds a manifest for subject d that CONSENTS to being
+// served by the given authority domains (the signed authority sequence).
+func delegatedManifest(t *testing.T, d string, authorities []string, now time.Time) []byte {
+	t.Helper()
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.New(d, now.Add(-time.Minute), now.Add(24*time.Hour),
+		mailkey.AlgX25519, mailkey.EncAES256GCM, priv.PublicKey().Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Authority = authorities
+	raw, err := manifest.Pack(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+/*
+TestDelegatedResolveAndConsent is the delegation revision's security core.
+
+A domain hosted elsewhere is fetched from its AUTHORITY's host, with the
+subject named in ?d= — and what comes back is accepted only because the
+manifest ITSELF names that host in its signed authority list. Four cases:
+
+ 1. delegated + consenting → accepted, and the request carried ?d=<subject>;
+ 2. delegated + NOT consenting (the manifest names someone else) → refused:
+    this is what makes a hostile a= worthless — it can misroute a request,
+    never move a trust decision, and a manifest stolen from one authority
+    cannot be re-served from another;
+ 3. a self-hosted manifest (no authority field) fetched from a delegated
+    host → refused, the pre-delegation rule unchanged;
+ 4. the dual-entry form ([new, old]) is accepted from EITHER host, which is
+    what keeps both DNS generations working during a primary switch.
+*/
+func TestDelegatedResolveAndConsent(t *testing.T) {
+	const subject = "customer.example"
+	// The fixture's cert is issued for mail.example.com — the AUTHORITY host,
+	// not the subject's: exactly the delegated deployment.
+	f := newAuthority(t)
+	r := newResolver(t, f)
+	now := time.Now()
+
+	// 1. Consenting manifest, served by its named authority.
+	f.body = delegatedManifest(t, subject, []string{domain}, now)
+	var gotQuery string
+	f.handler = func(w http.ResponseWriter, req *http.Request) {
+		gotQuery = req.URL.Query().Get("d")
+		w.Header().Set("Content-Type", mailkey.MediaType)
+		_, _ = w.Write(f.body)
+	}
+	res, err := r.Resolve(context.Background(), subject, domain)
+	if err != nil {
+		t.Fatalf("delegated resolve: %v", err)
+	}
+	if res.Manifest.Domain != subject {
+		t.Fatalf("subject = %q", res.Manifest.Domain)
+	}
+	if gotQuery != subject {
+		t.Fatalf("the authority must be told the subject via ?d=, got %q", gotQuery)
+	}
+
+	// 2. The same host serving a manifest that consents to somebody ELSE.
+	f.body = delegatedManifest(t, subject, []string{"other-provider.example"}, now)
+	if _, err := r.Resolve(context.Background(), subject, domain); err == nil {
+		t.Fatal("a manifest whose signed authority does not name the serving host must be refused")
+	} else if !strings.Contains(err.Error(), "authority") {
+		t.Fatalf("refusal must name the consent failure: %v", err)
+	}
+
+	// 3. A self-hosted manifest cannot be served from a delegated host.
+	f.body = delegatedManifest(t, subject, nil, now)
+	if _, err := r.Resolve(context.Background(), subject, domain); err == nil {
+		t.Fatal("a manifest with no authority consents only to its own host")
+	}
+
+	// 4. Mid-switch: consent to BOTH generations is accepted from either.
+	f.body = delegatedManifest(t, subject, []string{"new-primary.example", domain}, now)
+	if _, err := r.Resolve(context.Background(), subject, domain); err != nil {
+		t.Fatalf("a dual-authority manifest must be accepted from the old host too: %v", err)
 	}
 }

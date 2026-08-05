@@ -31,12 +31,8 @@ import (
 
 	"github.com/mailnite/mailkey"
 	"github.com/mailnite/mailkey/manifest"
-	"golang.org/x/net/idna"
 	"golang.org/x/xerrors"
 )
-
-// maxDomainLen is the DNS limit on a presentation-format name.
-const maxDomainLen = 253
 
 // maxTXTLen bounds one TXT string before parsing.
 const maxTXTLen = 512
@@ -45,85 +41,19 @@ const maxTXTLen = 512
 // is tiny (roughly 70 bytes); anything far larger is not a header we wrote.
 const MaxHeaderLen = 512
 
-// idnaProfile is deliberately strict: it maps to an ASCII A-label, validates
-// the label structure, and refuses anything it cannot represent. A domain that
-// does not survive this never reaches the network.
-var idnaProfile = idna.New(
-	idna.MapForLookup(),
-	idna.StrictDomainName(true),
-	idna.VerifyDNSLength(true),
-	idna.BidiRule(),
-)
+/*
+Normalize converts an email domain to its protocol form: a lowercase ASCII
+IDNA A-label with no trailing dot, scheme, port, user info, wildcard or IP
+literal.
 
-// Normalize converts an email domain to its protocol form: a lowercase ASCII
-// IDNA A-label with no trailing dot, no scheme, port, path, user info,
-// wildcard or IP literal.
-//
-// This is the security boundary for every name that comes off the wire. It is
-// intentionally restrictive — an IP literal, a name with a port, or anything
-// resembling a URL is rejected outright rather than coerced into something
-// dialable.
-func Normalize(domain string) (string, error) {
-	d := strings.TrimSpace(domain)
-	if d == "" {
-		return "", xerrors.New("domain: empty")
-	}
-	if len(d) > maxDomainLen+1 { // +1 tolerates a trailing dot before trimming
-		return "", xerrors.Errorf("domain: longer than %d characters", maxDomainLen)
-	}
-	// Reject URL-ish and address-ish shapes before IDNA sees them: these are
-	// the shapes that would otherwise smuggle a target past the derivation.
-	if strings.ContainsAny(d, "/\\?#@ \t\r\n%") {
-		return "", xerrors.Errorf("domain: %q must be a bare domain name", domain)
-	}
-	if strings.Contains(d, "://") {
-		return "", xerrors.Errorf("domain: %q must not contain a scheme", domain)
-	}
-	if strings.Contains(d, ":") {
-		return "", xerrors.Errorf("domain: %q must not contain a port", domain)
-	}
-	if strings.HasPrefix(d, "*") || strings.Contains(d, "*") {
-		return "", xerrors.Errorf("domain: %q must not be a wildcard", domain)
-	}
-	if strings.HasPrefix(d, "[") {
-		return "", xerrors.Errorf("domain: %q must not be an IP literal", domain)
-	}
-	d = strings.TrimSuffix(d, ".")
-	if d == "" {
-		return "", xerrors.New("domain: empty")
-	}
-	if net.ParseIP(d) != nil {
-		return "", xerrors.Errorf("domain: %q is an IP address, not a domain", domain)
-	}
-	ascii, err := idnaProfile.ToASCII(d)
-	if err != nil {
-		return "", xerrors.Errorf("domain %q: %w", domain, err)
-	}
-	ascii = strings.ToLower(strings.TrimSuffix(ascii, "."))
-	// A single label ("localhost", "internal") is not a public email domain.
-	if !strings.Contains(ascii, ".") {
-		return "", xerrors.Errorf("domain: %q has no public suffix", domain)
-	}
-	// Belt and braces: the A-label output must still be a plausible hostname.
-	if net.ParseIP(ascii) != nil {
-		return "", xerrors.Errorf("domain: %q resolves to an IP literal form", domain)
-	}
-	// Idempotence, verified rather than assumed. Some Punycode labels convert
-	// once and then fail validation on their own output (an A-label whose
-	// decoded form is invalid), which would make the accepted spelling depend
-	// on how many times normalization ran. The domain is inside the kid
-	// preimage, so two code paths disagreeing about its spelling would break
-	// interoperability — reject instead, and let the one canonical spelling be
-	// the only accepted one.
-	stable, err := idnaProfile.ToASCII(ascii)
-	if err != nil {
-		return "", xerrors.Errorf("domain %q: unstable normalization: %w", domain, err)
-	}
-	if strings.ToLower(strings.TrimSuffix(stable, ".")) != ascii {
-		return "", xerrors.Errorf("domain %q has no stable normal form (%q then %q)", domain, ascii, stable)
-	}
-	return ascii, nil
-}
+The implementation lives in the ROOT package (mailkey.NormalizeDomain) because
+the canonical form is protocol-wide: manifest packing must reject a domain the
+resolver would normalize differently, and manifest cannot import discovery (the
+dependency runs the other way). One rule, one implementation, reachable from
+both sides — this name stays as the discovery-side spelling every caller and
+the published vectors already use.
+*/
+func Normalize(domain string) (string, error) { return mailkey.NormalizeDomain(domain) }
 
 // DNSName is the TXT owner name that advertises MKDP1 for a domain.
 func DNSName(domain string) (string, error) {
@@ -134,11 +64,23 @@ func DNSName(domain string) (string, error) {
 	return mailkey.DNSPrefix + "." + d, nil
 }
 
-// AuthorityHost is the only host MKDP1 will talk to for a domain.
-func AuthorityHost(domain string) (string, error) {
+// AuthorityHost is the only host MKDP1 will talk to for a domain: the mail
+// host of the domain's AUTHORITY. authority is the a= observation ("" =
+// self-hosted, the authority is the domain itself). Both inputs pass the same
+// Normalize bounds, so the reachable set stays "mail.<some public domain>" —
+// scheme, port and path are fixed elsewhere, and no observation can widen
+// this into a URL.
+func AuthorityHost(domain, authority string) (string, error) {
 	d, err := Normalize(domain)
 	if err != nil {
 		return "", err
+	}
+	if authority != "" {
+		a, aerr := Normalize(authority)
+		if aerr != nil {
+			return "", xerrors.Errorf("authority: %w", aerr)
+		}
+		d = a
 	}
 	return mailkey.HostPrefix + "." + d, nil
 }
@@ -208,15 +150,23 @@ func cutPrefixLabel(host, label string) (string, bool) {
 	return host[len(p):], true
 }
 
-// DiscoveryURL derives the complete authority URL. It takes a domain and
-// nothing else: there is no code path in MKDP1 that accepts a caller-supplied
-// URL, host or port.
-func DiscoveryURL(domain string) (*url.URL, error) {
-	host, err := AuthorityHost(domain)
+// DiscoveryURL derives the complete authority URL for a subject domain and
+// its (possibly empty) delegated authority. It accepts two Normalize-bounded
+// DOMAINS and nothing else: there is no code path in MKDP1 that accepts a
+// caller-supplied URL, host or port. The subject always rides as ?d= — one
+// uniform request shape whether self-hosted or delegated — which is what
+// lets one host serve many domains' manifests.
+func DiscoveryURL(domain, authority string) (*url.URL, error) {
+	host, err := AuthorityHost(domain, authority)
 	if err != nil {
 		return nil, err
 	}
-	return &url.URL{Scheme: "https", Host: host, Path: mailkey.WellKnownPath}, nil
+	d, err := Normalize(domain)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{mailkey.SubjectQueryParam: []string{d}}
+	return &url.URL{Scheme: "https", Host: host, Path: mailkey.WellKnownPath, RawQuery: q.Encode()}, nil
 }
 
 // ParseDNS reads the TXT strings at _mailkey.<domain> into advertisements.
@@ -257,12 +207,26 @@ func ParseHeader(headerValue string) (mailkey.Advertisement, error) {
 }
 
 // FormatHeader renders the header a server stamps on its own outbound mail.
-func FormatHeader(domain string, id mailkey.ManifestID) (string, error) {
+// authority is the delegated authority domain ("" = self-hosted) — the header
+// form must carry it too, because header-only discovery works with DNS
+// optional, and a delegated domain's header would otherwise send resolvers to
+// a mail.<d> that serves no TLS.
+func FormatHeader(domain string, id mailkey.ManifestID, authority string) (string, error) {
 	d, err := Normalize(domain)
 	if err != nil {
 		return "", err
 	}
-	return "v=" + mailkey.Version + "; d=" + d + "; id=" + encodeID(id) + "; mode=" + mailkey.Mode, nil
+	out := "v=" + mailkey.Version + "; d=" + d + "; id=" + encodeID(id)
+	if authority != "" {
+		a, aerr := Normalize(authority)
+		if aerr != nil {
+			return "", xerrors.Errorf("authority: %w", aerr)
+		}
+		if a != d {
+			out += "; a=" + a
+		}
+	}
+	return out + "; mode=" + mailkey.Mode, nil
 }
 
 /*
@@ -279,12 +243,18 @@ because an alert that fires routinely is an alert that gets ignored.
 A domain with no identity key yet falls back to the deprecated id= form, so it
 still publishes something a resolver can act on.
 */
-func FormatDNS(fp mailkey.Fingerprint, hasFP bool, id mailkey.ManifestID) string {
+// authority is the delegated authority domain ("" = self-hosted); a caller
+// passing a non-normalized value gets it normalized here — the record is what
+// operators paste into zones, so it must come out in A-label form.
+func FormatDNS(fp mailkey.Fingerprint, hasFP bool, id mailkey.ManifestID, authority string) string {
 	out := "v=" + mailkey.Version
 	if hasFP {
 		out += "; fp=" + manifest.EncodeID(fp)
 	} else {
 		out += "; id=" + encodeID(id)
+	}
+	if a, err := Normalize(authority); authority != "" && err == nil {
+		out += "; a=" + a
 	}
 	return out + "; mode=" + mailkey.Mode
 }
@@ -349,6 +319,20 @@ func parseParams(s, domain string, requireDomain bool) (mailkey.Advertisement, e
 		ad.Domain = nd
 	} else if requireDomain {
 		return zero, xerrors.New("advertisement: missing d=")
+	}
+	// a= names the AUTHORITY DOMAIN whose mail host serves this domain's
+	// manifests (delegated authority). It is a DOMAIN under the same Normalize
+	// bounds as d — the one bounded degree of freedom the delegation revision
+	// adds — never a host, port, path or URL. A self-pointing a= collapses to
+	// the self-hosted form so Authority != "" always MEANS delegated.
+	if av, present := fields["a"]; present {
+		na, aerr := Normalize(av)
+		if aerr != nil {
+			return zero, xerrors.Errorf("advertisement: a=: %w", aerr)
+		}
+		if na != ad.Domain {
+			ad.Authority = na
+		}
 	}
 	// Reject any field that could name a target: MKDP1 derives the host.
 	for _, forbidden := range []string{"url", "host", "port", "path", "endpoint", "pk", "key", "seq"} {

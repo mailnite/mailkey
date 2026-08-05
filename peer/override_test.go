@@ -18,7 +18,7 @@ import (
 
 type fixedResolver struct{ res mailkey.Result }
 
-func (f *fixedResolver) Resolve(context.Context, string) (mailkey.Result, error) {
+func (f *fixedResolver) Resolve(context.Context, string, string) (mailkey.Result, error) {
 	return f.res, nil
 }
 

@@ -40,6 +40,7 @@ import (
 const (
 	fieldVersion   = "v"
 	fieldDomain    = "domain"
+	fieldAuthority = "authority"
 	fieldIssuedAt  = "issued_at"
 	fieldExpiresAt = "expires_at"
 	fieldKey       = "key"
@@ -149,6 +150,22 @@ func Pack(m mailkey.Manifest) ([]byte, error) {
 	if m.Domain == "" {
 		return nil, xerrors.New("pack: empty domain")
 	}
+	// The domain inside a signed object must already be the protocol's
+	// canonical form. Packing a U-label produces a self-consistent manifest
+	// whose kid derives from bytes no resolver ever computes (lookups
+	// normalize first), so it fails validation everywhere — closed, but
+	// baffling. Reject it at the source, where it is fixable.
+	if canon, cerr := mailkey.NormalizeDomain(m.Domain); cerr != nil || canon != m.Domain {
+		return nil, xerrors.Errorf("pack: domain %q is not in canonical form (want %q)", m.Domain, canon)
+	}
+	if len(m.Authority) > mailkey.MaxAuthorityEntries {
+		return nil, xerrors.Errorf("pack: authority has %d entries, at most %d allowed", len(m.Authority), mailkey.MaxAuthorityEntries)
+	}
+	for _, a := range m.Authority {
+		if canon, cerr := mailkey.NormalizeDomain(a); cerr != nil || canon != a {
+			return nil, xerrors.Errorf("pack: authority %q is not in canonical form (want %q)", a, canon)
+		}
+	}
 	if err := checkSuite(m.Key.Algorithm, m.Key.Encryption, m.Key.PublicKey); err != nil {
 		return nil, xerrors.Errorf("pack: %w", err)
 	}
@@ -168,13 +185,24 @@ func Pack(m mailkey.Manifest) ([]byte, error) {
 		fieldEnc: value.Utf8(m.Key.Encryption),
 		fieldPk:  value.Raw(m.Key.PublicKey, true),
 	})
-	return value.Pack(value.SortedMapOf(map[string]value.Value{
+	top := map[string]value.Value{
 		fieldVersion:   value.Utf8(m.Version),
 		fieldDomain:    value.Utf8(m.Domain),
 		fieldIssuedAt:  value.Long(m.IssuedAt.Unix()),
 		fieldExpiresAt: value.Long(m.ExpiresAt.Unix()),
 		fieldKey:       keyMap,
-	}))
+	}
+	// Present only when delegated, so a self-hosted manifest packs the exact
+	// bytes it packed before this field existed — every published vector and
+	// every cached id stays valid.
+	if len(m.Authority) > 0 {
+		list := value.EmptyList(false)
+		for _, a := range m.Authority {
+			list = list.Append(value.Utf8(a))
+		}
+		top[fieldAuthority] = list
+	}
+	return value.Pack(value.SortedMapOf(top))
 }
 
 // ManifestIDOf is SHA-256 of canonical manifest bytes. Call it on the bytes
@@ -209,7 +237,13 @@ func ParseCanonical(raw []byte, requestedDomain string) (mailkey.Manifest, error
 	if err != nil {
 		return zero, err
 	}
-	if err := exactKeys(top, "manifest", fieldVersion, fieldDomain, fieldIssuedAt, fieldExpiresAt, fieldKey); err != nil {
+	// authority is OPTIONAL (absent = self-hosted), so the key set is bounded
+	// rather than exact. Strictness is preserved where it matters: the repack
+	// check at the end still rejects anything that is not byte-identical
+	// canonical form, so an unknown field cannot ride along.
+	if err := boundedKeys(top, "manifest",
+		[]string{fieldVersion, fieldDomain, fieldIssuedAt, fieldExpiresAt, fieldKey},
+		[]string{fieldAuthority}); err != nil {
 		return zero, err
 	}
 	ver, err := utf8Field(top, fieldVersion)
@@ -225,6 +259,15 @@ func ParseCanonical(raw []byte, requestedDomain string) (mailkey.Manifest, error
 	}
 	if requestedDomain != "" && domain != requestedDomain {
 		return zero, xerrors.Errorf("manifest: describes domain %q, requested %q", domain, requestedDomain)
+	}
+	// The domain that comes off the wire must be the canonical form, or two
+	// spellings of one domain could carry two identities.
+	if canon, cerr := mailkey.NormalizeDomain(domain); cerr != nil || canon != domain {
+		return zero, xerrors.Errorf("manifest: domain %q is not in canonical form", domain)
+	}
+	authority, err := authorityField(top)
+	if err != nil {
+		return zero, err
 	}
 	issued, err := longField(top, fieldIssuedAt)
 	if err != nil {
@@ -275,6 +318,7 @@ func ParseCanonical(raw []byte, requestedDomain string) (mailkey.Manifest, error
 	m := mailkey.Manifest{
 		Version:   ver,
 		Domain:    domain,
+		Authority: authority,
 		IssuedAt:  time.Unix(issued, 0).UTC(),
 		ExpiresAt: time.Unix(expires, 0).UTC(),
 		Key:       mailkey.KeyDescriptor{Kid: want, Algorithm: alg, Encryption: enc, PublicKey: pk},
@@ -360,6 +404,64 @@ func asMap(v value.Value, what string) (value.Map, error) {
 
 // exactKeys requires the map to carry exactly the named keys — no unknown
 // fields (fail closed on anything we do not understand), none missing.
+// boundedKeys accepts exactly the required keys plus any subset of the
+// optional ones — the strict-but-extensible shape an OPTIONAL protocol field
+// needs. Anything outside both sets is refused.
+func boundedKeys(m value.Map, what string, required, optional []string) error {
+	allowed := make(map[string]bool, len(required)+len(optional))
+	for _, k := range required {
+		allowed[k] = true
+	}
+	for _, k := range optional {
+		allowed[k] = true
+	}
+	for _, k := range m.Keys() {
+		if !allowed[k] {
+			return xerrors.Errorf("%s: unexpected field %q", what, k)
+		}
+	}
+	for _, k := range required {
+		if m.Get(k) == nil {
+			return xerrors.Errorf("%s: missing field %q", what, k)
+		}
+	}
+	return nil
+}
+
+// authorityField reads the optional signed authority sequence, enforcing the
+// same bounds Pack does: at most MaxAuthorityEntries canonical domains. An
+// absent field is the self-hosted default (nil).
+func authorityField(m value.Map) ([]string, error) {
+	v := m.Get(fieldAuthority)
+	if v == nil || v.Kind() == value.NULL {
+		return nil, nil
+	}
+	lst, ok := v.(value.List)
+	if !ok || v.Kind() != value.LIST {
+		return nil, xerrors.Errorf("manifest: field %q must be a list", fieldAuthority)
+	}
+	items := lst.Values()
+	if len(items) == 0 {
+		return nil, xerrors.Errorf("manifest: field %q must not be empty when present", fieldAuthority)
+	}
+	if len(items) > mailkey.MaxAuthorityEntries {
+		return nil, xerrors.Errorf("manifest: %q has %d entries, at most %d allowed", fieldAuthority, len(items), mailkey.MaxAuthorityEntries)
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		str, ok := it.(value.String)
+		if !ok || it.Kind() != value.STRING || str.Type() != value.UTF8 {
+			return nil, xerrors.Errorf("manifest: %q entries must be UTF-8 strings", fieldAuthority)
+		}
+		a := str.Utf8()
+		if canon, cerr := mailkey.NormalizeDomain(a); cerr != nil || canon != a {
+			return nil, xerrors.Errorf("manifest: authority %q is not in canonical form", a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
 func exactKeys(m value.Map, what string, want ...string) error {
 	keys := m.Keys()
 	if len(keys) != len(want) {

@@ -67,26 +67,28 @@ func TestDerivedNames(t *testing.T) {
 	if name != "_mailkey.example.com" {
 		t.Fatalf("DNSName = %q", name)
 	}
-	host, err := discovery.AuthorityHost("example.com")
+	host, err := discovery.AuthorityHost("example.com", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if host != "mail.example.com" {
 		t.Fatalf("AuthorityHost = %q", host)
 	}
-	u, err := discovery.DiscoveryURL("example.com")
+	u, err := discovery.DiscoveryURL("example.com", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.String() != "https://mail.example.com/.well-known/mail-key" {
+	// The subject rides as ?d= on EVERY fetch — self-hosted included — so one
+	// authority host can serve many domains with one request shape.
+	if u.String() != "https://mail.example.com/.well-known/mail-key?d=example.com" {
 		t.Fatalf("DiscoveryURL = %q", u.String())
 	}
-	if u.Scheme != "https" || u.Port() != "" || u.User != nil || u.RawQuery != "" {
+	if u.Scheme != "https" || u.Port() != "" || u.User != nil || u.Query().Get("d") != "example.com" {
 		t.Fatalf("DiscoveryURL must be a bare https URL: %+v", u)
 	}
 	// A hostile "domain" cannot produce a URL at all.
 	for _, bad := range []string{"evil.example:8080", "https://evil.example", "127.0.0.1", "*.example.com"} {
-		if _, err := discovery.DiscoveryURL(bad); err == nil {
+		if _, err := discovery.DiscoveryURL(bad, ""); err == nil {
 			t.Errorf("DiscoveryURL(%q) must fail", bad)
 		}
 	}
@@ -105,7 +107,7 @@ func testID(t *testing.T) mailkey.ManifestID {
 // header is normalized on the way in.
 func TestHeaderRoundTrip(t *testing.T) {
 	id := testID(t)
-	h, err := discovery.FormatHeader("Example.COM", id)
+	h, err := discovery.FormatHeader("Example.COM", id, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +174,9 @@ func TestParseDNS(t *testing.T) {
 	idB[0] ^= 0xff
 
 	ads, skipped, err := discovery.ParseDNS("example.com", []string{
-		discovery.FormatDNS(mailkey.Fingerprint{}, false, idA),
+		discovery.FormatDNS(mailkey.Fingerprint{}, false, idA, ""),
 		"v=spf1 include:_spf.example.com ~all", // an unrelated TXT record
-		discovery.FormatDNS(mailkey.Fingerprint{}, false, idB),
+		discovery.FormatDNS(mailkey.Fingerprint{}, false, idB, ""),
 		"v=MKDP1; id=broken",
 	})
 	if err != nil {
@@ -234,6 +236,73 @@ func TestDomainCandidatesOf(t *testing.T) {
 		"mail.example.com:8443", "*.example.com", "https://mail.example.com"} {
 		if got := discovery.DomainCandidatesOf(in); len(got) != 0 {
 			t.Errorf("%q must yield no candidates, got %v", in, got)
+		}
+	}
+}
+
+/*
+TestDelegatedAuthority pins the delegation grammar and derivation:
+
+  - a= is parsed as a bounded DOMAIN and normalized (IDN included), so the
+    reachable set stays "mail.<public domain>" — the one degree of freedom
+    the delegation revision adds;
+  - a self-pointing a= collapses to the self-hosted form, so a non-empty
+    Authority always MEANS delegated;
+  - the derived host follows the authority while the SUBJECT still rides as
+    ?d=, which is what lets one host serve many domains;
+  - a URL-ish or otherwise unbounded a= makes the whole record malformed
+    rather than degrading to self-hosted (silent degradation is how an
+    attacker who can corrupt one character turns delegation off).
+*/
+func TestDelegatedAuthority(t *testing.T) {
+	fp := mailkey.Fingerprint{9: 7}
+	rec := discovery.FormatDNS(fp, true, mailkey.ManifestID{}, "Primary.COM")
+	if !strings.Contains(rec, "a=primary.com") {
+		t.Fatalf("FormatDNS must emit a normalized a=: %q", rec)
+	}
+	ads, skipped, err := discovery.ParseDNS("customer.example", []string{rec})
+	if err != nil || len(ads) != 1 || len(skipped) != 0 {
+		t.Fatalf("parse: %v ads=%d skipped=%v", err, len(ads), skipped)
+	}
+	if ads[0].Authority != "primary.com" || ads[0].Domain != "customer.example" {
+		t.Fatalf("delegated ad = %+v", ads[0])
+	}
+
+	// The IDN case, both directions: an internationalized authority is stored
+	// and compared as its A-label.
+	idn := discovery.FormatDNS(fp, true, mailkey.ManifestID{}, "пример.рф")
+	if !strings.Contains(idn, "a=xn--e1afmkfd.xn--p1ai") {
+		t.Fatalf("an IDN authority must be published as an A-label: %q", idn)
+	}
+	idnAds, _, err := discovery.ParseDNS("xn--e1afmkfd.xn--p1ai", []string{
+		"v=MKDP1; fp=" + strings.SplitN(strings.SplitN(idn, "fp=", 2)[1], ";", 2)[0] + "; a=пример.рф; mode=https",
+	})
+	if err != nil || len(idnAds) != 1 {
+		t.Fatalf("IDN parse: %v", err)
+	}
+	if idnAds[0].Authority != "" {
+		t.Fatalf("a self-pointing a= must collapse to self-hosted, got %q", idnAds[0].Authority)
+	}
+
+	// Derivation: the host follows the AUTHORITY, the subject rides as ?d=.
+	host, err := discovery.AuthorityHost("customer.example", "primary.com")
+	if err != nil || host != "mail.primary.com" {
+		t.Fatalf("AuthorityHost = %q, %v", host, err)
+	}
+	u, err := discovery.DiscoveryURL("customer.example", "primary.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.String() != "https://mail.primary.com/.well-known/mail-key?d=customer.example" {
+		t.Fatalf("delegated URL = %q", u.String())
+	}
+
+	// An a= that is not a bare domain kills the record.
+	for _, bad := range []string{"https://evil.example", "evil.example:8443", "evil.example/x", "127.0.0.1"} {
+		_, sk, perr := discovery.ParseDNS("customer.example",
+			[]string{"v=MKDP1; id=" + strings.Repeat("A", 43) + "; a=" + bad + "; mode=https"})
+		if perr == nil && len(sk) == 0 {
+			t.Fatalf("a=%q must make the record malformed", bad)
 		}
 	}
 }

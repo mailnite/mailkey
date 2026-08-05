@@ -57,12 +57,18 @@ func FuzzNormalize(f *testing.F) {
 			t.Fatalf("not idempotent: %q → %q → %q", in, d, again)
 		}
 		// The derived URL is always the same fixed shape.
-		u, err := discovery.DiscoveryURL(d)
+		u, err := discovery.DiscoveryURL(d, "")
 		if err != nil {
 			t.Fatalf("an accepted domain must yield a URL: %v", err)
 		}
-		if u.Scheme != "https" || u.Path != "/.well-known/mail-key" || u.Host != "mail."+d || u.User != nil || u.RawQuery != "" {
+		// Fixed scheme, host and path; the ONLY variable part is the subject
+		// query, whose value must be the normalized domain and nothing else.
+		if u.Scheme != "https" || u.Path != "/.well-known/mail-key" || u.Host != "mail."+d || u.User != nil {
 			t.Fatalf("derived URL is not the fixed shape: %+v", u)
+		}
+		q := u.Query()
+		if len(q) != 1 || q.Get("d") != d {
+			t.Fatalf("derived URL query must be exactly d=%q: %+v", d, u.RawQuery)
 		}
 	})
 }

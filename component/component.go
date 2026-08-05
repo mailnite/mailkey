@@ -110,11 +110,11 @@ func (t *ResolverBean) PostConstruct() error {
 // Resolve implements mailkey.Resolver. With MKDP1 switched off it reports that
 // no key is available rather than resolving — a disabled protocol must not make
 // network requests, and the caller's policy decides what "no key" means.
-func (t *ResolverBean) Resolve(ctx context.Context, domain string) (mailkey.Result, error) {
+func (t *ResolverBean) Resolve(ctx context.Context, domain, authority string) (mailkey.Result, error) {
 	if !t.enabled {
 		return mailkey.Result{}, mailkey.ErrDisabled
 	}
-	return t.resolver.Resolve(ctx, domain)
+	return t.resolver.Resolve(ctx, domain, authority)
 }
 
 // ServiceBean is the glue bean for the peer service: observations in, validated

@@ -200,6 +200,13 @@ func (s *Service) ObserveDNS(ctx context.Context, domain string, txt []string) e
 		return nil // no MKDP1 records at all: nothing observed, nothing to say
 	}
 	o := mailkey.Observation{Source: mailkey.SourceDNS, ObservedAt: now}
+	// The delegated authority, when every record agrees on one. Disagreement
+	// leaves it empty (self-hosted): a domain whose records fight about where
+	// its manifests live has said nothing usable, and the derived host is the
+	// safe reading.
+	if a, consistent := singleAuthority(ads); consistent {
+		o.Authority = a
+	}
 	if id, consistent := singleID(ads); consistent {
 		o.ManifestID, o.HasID = id, true
 	} else {
@@ -227,6 +234,7 @@ func (s *Service) ObserveHeader(ctx context.Context, headerValue, msgContext str
 	if ad.HasID {
 		o.ManifestID, o.HasID = ad.ManifestID, true
 	}
+	o.Authority = ad.Authority
 	return s.observe(ctx, ad.Domain, o)
 }
 
@@ -282,6 +290,43 @@ func (s *Service) scheduleIfBehind(ctx context.Context, domain string) error {
 // singleID reports the common manifest id of a set of advertisements, and
 // whether they agree. Advertisements without an id do not create disagreement;
 // two DIFFERENT ids do.
+// singleAuthority is singleID's twin for the a= field: one agreed delegated
+// authority across every record, or (false) disagreement. An empty result with
+// ok=true is the ordinary self-hosted case.
+func singleAuthority(ads []mailkey.Advertisement) (string, bool) {
+	a := ""
+	seen := false
+	for _, ad := range ads {
+		if !seen {
+			a, seen = ad.Authority, true
+			continue
+		}
+		if ad.Authority != a {
+			return "", false
+		}
+	}
+	return a, true
+}
+
+// authorityHint reads the delegated authority the freshest observations agreed
+// on. It is a ROUTING lookup, deliberately best-effort: a store error or an
+// absent record yields "", which resolves against the derived host — the
+// pre-delegation behavior.
+func (s *Service) authorityHint(ctx context.Context, domain string) string {
+	p, err := s.store.GetPeer(ctx, domain)
+	if err != nil || p == nil {
+		return ""
+	}
+	newest := time.Time{}
+	hint := ""
+	for _, o := range p.Observations {
+		if o.ObservedAt.After(newest) {
+			newest, hint = o.ObservedAt, o.Authority
+		}
+	}
+	return hint
+}
+
 func singleID(ads []mailkey.Advertisement) (mailkey.ManifestID, bool) {
 	var id mailkey.ManifestID
 	seen := false
@@ -514,7 +559,7 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 			}
 		}
 	}
-	res, err := s.resolver.Resolve(ctx, d)
+	res, err := s.resolver.Resolve(ctx, d, s.authorityHint(ctx, d))
 	if err != nil {
 		if ferr := s.store.RecordFailure(ctx, d, err); ferr != nil {
 			return mailkey.Result{}, ferr

@@ -37,7 +37,7 @@ type chainResolver struct {
 	chainHit *int
 }
 
-func (c *chainResolver) Resolve(context.Context, string) (mailkey.Result, error) {
+func (c *chainResolver) Resolve(context.Context, string, string) (mailkey.Result, error) {
 	return c.res, nil
 }
 

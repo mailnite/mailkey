@@ -31,7 +31,7 @@
   "manifest": {
     "canonical_bytes_hex": "85a6646f6d61696eab6578616d706c652e636f6daa657870697265735f6174ce65554280a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c42042ca151eb3d40cf28b4c2e57b0038e670d702594217d8807caa48567c6257b7ea2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
     "canonical_bytes_len": 164,
-    "discovery_url": "https://mail.example.com/.well-known/mail-key",
+    "discovery_url": "https://mail.example.com/.well-known/mail-key?d=example.com",
     "dns_owner_name": "_mailkey.example.com",
     "dns_txt_value": "v=MKDP1; id=iErreOTszRhevJCaD56t1MfFP_EqAd3NsKsrfmERfpw; mode=https",
     "input": {

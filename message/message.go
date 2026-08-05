@@ -189,11 +189,14 @@ sender's authority, never by installing what it read. That is why it needs no
 trust at all, and why the worst a forged one achieves is a wasted request for the
 forger.
 */
-func Advertise(raw []byte, domain string, id mailkey.ManifestID) ([]byte, error) {
+// authority is the sending domain's delegated authority ("" = self-hosted):
+// a delegated domain's header must say WHERE its manifests are served, or
+// header-only receivers (DNS is optional) would dial a mail.<d> with no TLS.
+func Advertise(raw []byte, domain string, id mailkey.ManifestID, authority string) ([]byte, error) {
 	// Delegated, never re-implemented: the header grammar is pinned by the
 	// published vectors, and a second copy of it here is precisely how two
 	// spellings of one advertisement come to exist.
-	value, err := discovery.FormatHeader(domain, id)
+	value, err := discovery.FormatHeader(domain, id, authority)
 	if err != nil {
 		return nil, err
 	}

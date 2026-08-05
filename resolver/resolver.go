@@ -181,14 +181,35 @@ func New(opts Options) *Resolver {
 // performs it and the rest wait for its outcome. That keeps an observation
 // burst — a mail flood, a DNS record change seen by many workers — down to a
 // single connection to the authority.
-func (r *Resolver) Resolve(ctx context.Context, domain string) (mailkey.Result, error) {
+// authority is the DELEGATED authority domain from the caller's freshest
+// advertisement ("" = self-hosted). It is a routing observation: it decides
+// which mail host is dialed and nothing else — the manifest must still bind
+// the SUBJECT domain, and (once the signed authority lands) the serving host
+// must appear in the manifest's own authority list.
+func (r *Resolver) Resolve(ctx context.Context, domain, authority string) (mailkey.Result, error) {
 	d, err := discovery.Normalize(domain)
 	if err != nil {
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, domain, err)
 	}
+	a := ""
+	if authority != "" {
+		if a, err = discovery.Normalize(authority); err != nil {
+			return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, domain, xerrors.Errorf("authority: %w", err))
+		}
+		if a == d {
+			a = "" // self-pointing hint collapses to self-hosted
+		}
+	}
+	// The in-flight key carries the authority too: two callers resolving the
+	// same domain through DIFFERENT authority hints must not share an outcome
+	// (one of them may be following a stale record mid-transition).
+	key := d
+	if a != "" {
+		key = d + "@" + a
+	}
 
 	r.mu.Lock()
-	if c, ok := r.inflight[d]; ok {
+	if c, ok := r.inflight[key]; ok {
 		r.mu.Unlock()
 		select {
 		case <-c.done:
@@ -198,13 +219,13 @@ func (r *Resolver) Resolve(ctx context.Context, domain string) (mailkey.Result, 
 		}
 	}
 	c := &call{done: make(chan struct{})}
-	r.inflight[d] = c
+	r.inflight[key] = c
 	r.mu.Unlock()
 
-	c.res, c.err = r.fetch(ctx, d)
+	c.res, c.err = r.fetch(ctx, d, a)
 
 	r.mu.Lock()
-	delete(r.inflight, d)
+	delete(r.inflight, key)
 	r.mu.Unlock()
 	close(c.done)
 	return c.res, c.err
@@ -212,7 +233,7 @@ func (r *Resolver) Resolve(ctx context.Context, domain string) (mailkey.Result, 
 
 // fetch performs one resolution: acquire a slot, build the request from the
 // domain alone, validate everything.
-func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) {
+func (r *Resolver) fetch(ctx context.Context, d, authority string) (mailkey.Result, error) {
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -223,11 +244,11 @@ func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) 
 	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
 	defer cancel()
 
-	u, err := discovery.DiscoveryURL(d)
+	u, err := discovery.DiscoveryURL(d, authority)
 	if err != nil {
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, d, err)
 	}
-	host, err := discovery.AuthorityHost(d)
+	host, err := discovery.AuthorityHost(d, authority)
 	if err != nil {
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailurePolicy, d, err)
 	}
@@ -300,6 +321,25 @@ func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) 
 	if err := manifest.Validate(m, now, r.opts.Limits); err != nil {
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailureProtocol, d, err)
 	}
+	/*
+		The consent check: the host we ACTUALLY fetched from must be one the
+		domain itself named in its signed manifest.
+
+		This is what makes delegated authority safe. The a= observation that
+		sent us here is unauthenticated — anyone can publish a record pointing
+		at anyone. Without this check a hostile record would make every
+		resolver on the internet fetch from a victim host and, worse, could
+		let a manifest stolen from one authority be re-served from another.
+		With it, the domain's own signature decides where its manifests may
+		live: a misdirected request gets a 404 or a manifest whose consent
+		does not name the host we reached, and dies here.
+
+		Self-hosted manifests (no authority field) consent to exactly one
+		host — their own — which is the pre-delegation rule, unchanged.
+	*/
+	if err := checkAuthorityConsent(m, host); err != nil {
+		return mailkey.Result{}, mailkey.Fail(mailkey.FailureProtocol, d, err)
+	}
 
 	out := mailkey.Result{
 		Manifest:   m,
@@ -343,6 +383,25 @@ func (r *Resolver) fetch(ctx context.Context, d string) (mailkey.Result, error) 
 // fresh transport per resolution costs one handshake and buys certainty: no
 // connection, DNS answer or TLS session is reused across domains, and the
 // dialer carries this domain's identity for error attribution.
+// checkAuthorityConsent enforces that fetchedHost is the mail host of some
+// authority the manifest itself names (or of the domain, when it names none).
+func checkAuthorityConsent(m mailkey.Manifest, fetchedHost string) error {
+	allowed := m.Authority
+	if len(allowed) == 0 {
+		allowed = []string{m.Domain}
+	}
+	for _, a := range allowed {
+		host, err := discovery.AuthorityHost(a, "")
+		if err != nil {
+			continue // a manifest entry that is not a domain consents to nothing
+		}
+		if strings.EqualFold(host, fetchedHost) {
+			return nil
+		}
+	}
+	return xerrors.Errorf("manifest served by %q, which its signed authority does not name (%v)", fetchedHost, allowed)
+}
+
 func (r *Resolver) clientFor(domain, host string) *http.Client {
 	d := &dialer{
 		policy:  r.policy,
@@ -468,7 +527,8 @@ manifest's.
 The body is returned raw. The caller walks it from its own pin; nothing here
 vouches for anything.
 */
-func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain string) ([]byte, error) {
+// authority mirrors Resolve's: the delegated authority hint ("" = self).
+func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain, authority string) ([]byte, error) {
 	d, err := discovery.Normalize(domain)
 	if err != nil {
 		return nil, mailkey.Fail(mailkey.FailurePolicy, domain, err)
@@ -482,11 +542,12 @@ func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain string) ([]b
 	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
 	defer cancel()
 
-	host, err := discovery.AuthorityHost(d)
+	host, err := discovery.AuthorityHost(d, authority)
 	if err != nil {
 		return nil, mailkey.Fail(mailkey.FailurePolicy, d, err)
 	}
-	u := &url.URL{Scheme: "https", Host: host, Path: identity.ResourcePath}
+	q := url.Values{mailkey.SubjectQueryParam: []string{d}}
+	u := &url.URL{Scheme: "https", Host: host, Path: identity.ResourcePath, RawQuery: q.Encode()}
 	if r.port != authorityPort {
 		u.Host = net.JoinHostPort(host, r.port)
 	}

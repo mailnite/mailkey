@@ -210,7 +210,7 @@ func TestAdvertiseIsOneFieldAndMatchesDiscovery(t *testing.T) {
 		"Mail-Key: v=MKDP1; d=evil.test; id=AAAA; mode=https\r\n" +
 		"Subject: hi\r\n\r\nbody\r\n"
 
-	out, err := message.Advertise([]byte(hostile), testDomain, res.ManifestID)
+	out, err := message.Advertise([]byte(hostile), testDomain, res.ManifestID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestAdvertiseIsOneFieldAndMatchesDiscovery(t *testing.T) {
 	if n := strings.Count(strings.ToLower(string(head)), "mail-key:"); n != 1 {
 		t.Fatalf("header block has %d Mail-Key fields, want exactly 1:\n%s", n, head)
 	}
-	want, err := discovery.FormatHeader(testDomain, res.ManifestID)
+	want, err := discovery.FormatHeader(testDomain, res.ManifestID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

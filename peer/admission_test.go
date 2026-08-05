@@ -46,7 +46,7 @@ func newCounting(now func() time.Time) *countingStore {
 // only needs "this domain was mentioned" still has to name a manifest —
 // anyID serves for that.
 func header(d string, id mailkey.ManifestID) string {
-	h, err := discovery.FormatHeader(d, id)
+	h, err := discovery.FormatHeader(d, id, "")
 	if err != nil {
 		panic(err)
 	}

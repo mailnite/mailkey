@@ -37,7 +37,7 @@ type flakyResolver struct {
 	fail  bool
 }
 
-func (f *flakyResolver) Resolve(_ context.Context, domain string) (mailkey.Result, error) {
+func (f *flakyResolver) Resolve(_ context.Context, domain, _ string) (mailkey.Result, error) {
 	f.calls++
 	if f.fail {
 		return mailkey.Result{}, mailkey.Fail(mailkey.FailureNetwork, domain, errors.New("authority unreachable"))
