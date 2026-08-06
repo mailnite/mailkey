@@ -34,12 +34,24 @@ The MKDP1 TXT value is:
 
 ```text
 v=MKDP1; id=<base64url manifest ID>; mode=https
+v=MKDP1; fp=<base64url fingerprint>; a=<authority domain>; mode=https
 ```
 
 Rules:
 
 - `v`, `id` and `mode` are all REQUIRED; a record missing any of them is
   malformed.
+- `a` is OPTIONAL: the AUTHORITY DOMAIN whose mail host serves this domain's
+  manifests (delegated authority — one provider hosting many domains, each
+  keeping its own key). Absent `a` means the domain is its own authority.
+- `a` MUST be a domain under the §1 normalization rules — never a host with a
+  port, a scheme, a path or a URL. A record whose `a` does not normalize is
+  malformed and MUST be ignored, not degraded to self-hosted.
+- `a` naming the record's own domain is equivalent to omitting it.
+- `a` is an OBSERVATION like every other field: it selects which host a client
+  dials and MUST NOT take part in any trust decision. A client MUST still bind
+  the manifest to the subject domain (§6) and MUST enforce the manifest's own
+  signed authority (§4).
 - `v` MUST equal `MKDP1`.
 - `mode` MUST equal `https`.
 - `id` MUST decode as exactly 32 bytes using unpadded base64url.
@@ -54,9 +66,15 @@ The field syntax is:
 
 ```text
 Mail-Key: v=MKDP1; d=example.com; id=<base64url manifest ID>; mode=https
+Mail-Key: v=MKDP1; d=customer.example; id=<...>; a=provider.example; mode=https
 ```
 
 Rules:
+
+- `a` is OPTIONAL and carries exactly the meaning, bounds and prohibitions it
+  has in §2. A delegated domain SHOULD emit it: header-only discovery is
+  valid MKDP1 (DNS is not required), and without it a receiver would derive
+  `mail.<d>`, which a delegated domain does not serve.
 
 - `v`, `d`, `id` and `mode` are all REQUIRED; a field missing any of them is
   malformed and MUST be ignored.
@@ -72,17 +90,39 @@ Rules:
 
 ## 4. HTTPS endpoint
 
-The only MKDP1 URL for `d` is:
+Write `a` for the authority domain of `d` (the `a=` observation, or `d` itself
+when there is none). The only MKDP1 URL for `d` is:
 
 ```text
-https://mail.<d>/.well-known/mail-key
+https://mail.<a>/.well-known/mail-key?d=<d>
 ```
+
+The subject `d` MUST be sent as the `d` query parameter on EVERY request,
+including the self-hosted case where `a` equals `d`. One request shape serves
+both, which is what lets one authority host answer for many domains.
+
+Both `a` and `d` MUST be normalized (§1) before the URL is built; the scheme,
+port and path are fixed by this specification and MUST NOT be taken from any
+observation.
+
+The server:
+
+- MUST answer for the NAMED subject only. There is no form of this request
+  that lists the domains a server hosts, and a server MUST NOT provide one:
+  the set of hosted domains is not public information.
+- MUST treat a `d` that does not normalize as a malformed request and answer
+  `404`, never falling back to the Host header.
+- MUST answer `404` for a subject it does not host, indistinguishably from any
+  other unknown domain.
+- When `d` is absent, MAY derive the subject from the Host header (the
+  pre-delegation behavior), which keeps older clients working.
 
 The client MUST:
 
 - use HTTPS;
 - perform normal WebPKI chain and hostname validation;
-- require the certificate identity for `mail.<d>`;
+- require the certificate identity for `mail.<a>` — the AUTHORITY's host, which
+  is the host actually contacted;
 - send `GET`;
 - reject redirects;
 - reject authentication prompts;
@@ -107,6 +147,24 @@ Cache-Control: max-age=<seconds>, must-revalidate
 ```
 
 The effective cache lifetime MUST NOT exceed the manifest's `expires_at`.
+
+### 4.1 Authority consent
+
+A manifest MAY carry an `authority` field (§6): the sequence of authority
+domains whose mail hosts the domain permits to serve it.
+
+After validating the manifest, the client MUST check that the host it actually
+fetched from equals `mail.<x>` for some `x` in that sequence — or, when the
+field is absent, `mail.<domain>`. A manifest failing this check MUST be
+rejected.
+
+This is what makes `a=` safe. The record is unauthenticated, so a hostile one
+can point a client at any MKDP1 host; consent means the worst outcome is a
+`404` or a rejected response, never an installed key. It equally prevents a
+manifest obtained from one authority being re-served from another.
+
+The identity resource (§4.2 of the domain-identity specification) carries the
+same field and MUST be checked the same way.
 
 ## 5. Canonical serialization
 
@@ -144,6 +202,7 @@ The logical schema is:
 {
   "v":          "MKDP1",
   "domain":     <UTF-8 normalized d>,
+  "authority":  [<UTF-8 normalized domain>, ...],   // OPTIONAL
   "issued_at":  <int64 Unix seconds>,
   "expires_at": <int64 Unix seconds>,
   "key": {
@@ -154,6 +213,26 @@ The logical schema is:
   }
 }
 ```
+
+`authority` rules:
+
+- OPTIONAL. Absent means the domain consents to be served by its own mail host
+  only, and the field MUST then be absent from the encoding entirely — a
+  self-hosted manifest is byte-identical to one produced before this field
+  existed, so existing manifest identifiers remain valid.
+- When present it MUST contain between 1 and 4 entries, each a normalized
+  domain (§1). A non-canonical entry makes the manifest invalid.
+- It is COVERED by the manifest identifier and by any signature over the
+  manifest: consent is granted by the domain itself, never by an observer.
+- Clients MUST enforce it as §4.1 describes.
+- Two entries are the transition form: a domain moving between authorities
+  publishes both so clients on either side of DNS propagation succeed, then
+  prunes to one when the move completes.
+
+`domain` (and each `authority` entry) MUST already be in the §1 canonical
+form; an implementation MUST refuse to produce or accept a manifest whose
+domain would change under normalization, because the key identifier is
+computed over those exact bytes.
 
 Initial algorithm identifiers:
 

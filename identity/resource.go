@@ -8,6 +8,7 @@ package identity
 
 import (
 	"crypto/ed25519"
+	"strings"
 	"time"
 
 	"github.com/mailnite/mailkey"
@@ -66,6 +67,15 @@ type Doc struct {
 	Alg       string
 	Status    string
 	UpdatedAt time.Time
+	// Authority is the domain's CONSENT to have its identity served
+	// elsewhere — the same signed grant the manifest carries, on the identity
+	// plane. Empty means only the domain's own mail host may serve it.
+	//
+	// It matters here for the same reason it matters there: an unauthenticated
+	// a= decides which host is dialed, so the document must say for itself
+	// which hosts it may come from, or a stolen identity resource could be
+	// re-served from anywhere.
+	Authority []string
 	// Chain is the ordered transition history. Order is a courtesy to readers;
 	// WalkChain does not depend on it, and must not, because the order is
 	// chosen by whoever serves the document.
@@ -199,11 +209,20 @@ func PackDoc(d Doc) ([]byte, error) {
 	if len(d.Chain) > MaxChainEntries {
 		return nil, xerrors.Errorf("%w: %d entries", ErrChainTooLong, len(d.Chain))
 	}
+	if len(d.Authority) > mailkey.MaxAuthorityEntries {
+		return nil, xerrors.Errorf("identity resource: authority has %d entries, at most %d allowed",
+			len(d.Authority), mailkey.MaxAuthorityEntries)
+	}
+	for _, a := range d.Authority {
+		if canon, cerr := mailkey.NormalizeDomain(a); cerr != nil || canon != a {
+			return nil, xerrors.Errorf("identity resource: authority %q is not in canonical form (want %q)", a, canon)
+		}
+	}
 	chain := value.EmptyList(false)
 	for _, s := range d.Chain {
 		chain = chain.Append(packStatement(s))
 	}
-	raw, err := value.Pack(value.SortedMapOf(map[string]value.Value{
+	top := map[string]value.Value{
 		"type":       value.Utf8(DocType),
 		"version":    value.Utf8(mailkey.Version),
 		"domain":     value.Utf8(dom),
@@ -213,7 +232,17 @@ func PackDoc(d Doc) ([]byte, error) {
 		"status":     value.Utf8(d.Status),
 		"updated_at": value.Long(d.UpdatedAt.Unix()),
 		"chain":      chain,
-	}))
+	}
+	// Present only when delegated, so a self-hosted document packs the bytes
+	// it packed before this field existed.
+	if len(d.Authority) > 0 {
+		list := value.EmptyList(false)
+		for _, a := range d.Authority {
+			list = list.Append(value.Utf8(a))
+		}
+		top["authority"] = list
+	}
+	raw, err := value.Pack(value.SortedMapOf(top))
 	if err != nil {
 		return nil, xerrors.Errorf("identity resource: %w", err)
 	}
@@ -245,8 +274,11 @@ func ParseDoc(domain string, raw []byte) (Doc, error) {
 	if err != nil {
 		return Doc{}, err
 	}
-	if err := exactKeys(m, "identity resource",
-		"type", "version", "domain", "active_fp", "active_pk", "alg", "status", "updated_at", "chain"); err != nil {
+	// authority is OPTIONAL (absent = self-hosted). Everything else is still
+	// exactly required, and an unknown field is still refused.
+	if err := boundedDocKeys(m,
+		[]string{"type", "version", "domain", "active_fp", "active_pk", "alg", "status", "updated_at", "chain"},
+		[]string{"authority"}); err != nil {
 		return Doc{}, err
 	}
 	out := Doc{Domain: dom}
@@ -270,6 +302,9 @@ func ParseDoc(domain string, raw []byte) (Doc, error) {
 		// The domain comes from the CALLER. A document lifted from one domain's
 		// endpoint must not authenticate for another.
 		return Doc{}, xerrors.New("identity resource: the document names a different domain than the one fetched")
+	}
+	if out.Authority, err = docAuthorityField(m); err != nil {
+		return Doc{}, err
 	}
 	if out.Alg, err = utf8Field(m, "alg"); err != nil {
 		return Doc{}, err
@@ -351,6 +386,83 @@ func asMap(v value.Value, what string) (value.Map, error) {
 		return nil, xerrors.Errorf("%s: expected a map", what)
 	}
 	return m, nil
+}
+
+// boundedDocKeys accepts the required keys plus any subset of the optional
+// ones — strict, but able to carry an OPTIONAL protocol field.
+func boundedDocKeys(m value.Map, required, optional []string) error {
+	allowed := make(map[string]bool, len(required)+len(optional))
+	for _, k := range required {
+		allowed[k] = true
+	}
+	for _, k := range optional {
+		allowed[k] = true
+	}
+	for _, k := range m.Keys() {
+		if !allowed[k] {
+			return xerrors.Errorf("identity resource: unexpected field %q", k)
+		}
+	}
+	for _, k := range required {
+		if m.Get(k) == nil {
+			return xerrors.Errorf("identity resource: missing field %q", k)
+		}
+	}
+	return nil
+}
+
+// docAuthorityField reads the optional signed authority sequence under the
+// same bounds PackDoc enforces.
+func docAuthorityField(m value.Map) ([]string, error) {
+	v := m.Get("authority")
+	if v == nil || v.Kind() == value.NULL {
+		return nil, nil
+	}
+	lst, ok := v.(value.List)
+	if !ok || v.Kind() != value.LIST {
+		return nil, xerrors.New("identity resource: authority must be a list")
+	}
+	items := lst.Values()
+	if len(items) == 0 {
+		return nil, xerrors.New("identity resource: authority must not be empty when present")
+	}
+	if len(items) > mailkey.MaxAuthorityEntries {
+		return nil, xerrors.Errorf("identity resource: authority has %d entries, at most %d allowed",
+			len(items), mailkey.MaxAuthorityEntries)
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		str, ok := it.(value.String)
+		if !ok || it.Kind() != value.STRING || str.Type() != value.UTF8 {
+			return nil, xerrors.New("identity resource: authority entries must be UTF-8 strings")
+		}
+		a := str.Utf8()
+		if canon, cerr := mailkey.NormalizeDomain(a); cerr != nil || canon != a {
+			return nil, xerrors.Errorf("identity resource: authority %q is not in canonical form", a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// CheckAuthority enforces that fetchedHost is the mail host of an authority
+// the document itself names (or of its own domain, when it names none) — the
+// identity plane's half of the delegation consent rule.
+func CheckAuthority(d Doc, fetchedHost string) error {
+	allowed := d.Authority
+	if len(allowed) == 0 {
+		allowed = []string{d.Domain}
+	}
+	for _, a := range allowed {
+		host, err := discovery.AuthorityHost(a, "")
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(host, fetchedHost) {
+			return nil
+		}
+	}
+	return xerrors.Errorf("identity resource served by %q, which its signed authority does not name (%v)", fetchedHost, allowed)
 }
 
 // exactKeys fails closed on anything unrecognised: no unknown fields, none

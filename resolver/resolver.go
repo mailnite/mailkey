@@ -588,5 +588,22 @@ func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain, authority s
 		return nil, mailkey.Failf(mailkey.FailureHTTP, d,
 			"the identity resource exceeds the %d byte limit", identity.MaxChainBytes)
 	}
+	// The identity plane's consent check, the twin of the manifest's: the
+	// document must name the host it came from. Without it a delegated fetch
+	// would accept an identity resource re-served from anywhere — and the
+	// identity plane is where pins and rotations are decided, so it is the
+	// last place that should trust an unauthenticated a=.
+	//
+	// Parsed here for the check only; the caller re-parses the same bytes for
+	// its own walk, which is deliberate — this function's contract is "the
+	// bytes", and re-deriving them is how the caller stays the one that
+	// decides what they mean.
+	doc, perr := identity.ParseDoc(d, body)
+	if perr != nil {
+		return nil, mailkey.Fail(mailkey.FailureProtocol, d, perr)
+	}
+	if cerr := identity.CheckAuthority(doc, host); cerr != nil {
+		return nil, mailkey.Fail(mailkey.FailureProtocol, d, cerr)
+	}
 	return body, nil
 }

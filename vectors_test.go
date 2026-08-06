@@ -446,3 +446,127 @@ func mustB64(t *testing.T, s string) []byte {
 	}
 	return b
 }
+
+// delegatedVectors is testdata/vectors-delegated.json: the published bytes and
+// strings a second implementation must reproduce for delegated authority.
+type delegatedVectors struct {
+	Subject            string            `json:"subject"`
+	Authority          string            `json:"authority"`
+	DNSOwnerName       string            `json:"dns_owner_name"`
+	DNSTxtValue        string            `json:"dns_txt_value"`
+	HeaderValue        string            `json:"header_value"`
+	AuthorityHost      string            `json:"authority_host"`
+	DiscoveryURL       string            `json:"discovery_url"`
+	CanonicalBytesHex  string            `json:"canonical_bytes_hex"`
+	ManifestID         string            `json:"manifest_id"`
+	TransitionBytesHex string            `json:"transition_bytes_hex"`
+	IDNSubject         string            `json:"idn_subject"`
+	IDNDNSOwnerName    string            `json:"idn_dns_owner_name"`
+	IDNDiscoveryURL    string            `json:"idn_discovery_url"`
+	IDNCanonicalHex    string            `json:"idn_canonical_bytes_hex"`
+	Rejects            map[string]string `json:"rejects"`
+}
+
+/*
+TestDelegatedVectors is the interop contract for delegated authority: the
+record, the header, the derived host and URL, and the canonical manifest bytes
+(self, transition and IDN forms) must all reproduce exactly — and the rejected
+records must stay rejected.
+
+A second implementation that passes this can host another provider's domains,
+and one that quietly accepts a URL-ish a= cannot.
+*/
+func TestDelegatedVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/vectors-delegated.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v delegatedVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := base64.RawURLEncoding.DecodeString(v.ManifestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mid mailkey.ManifestID
+	copy(mid[:], id)
+
+	if got := discovery.FormatDNS(mailkey.Fingerprint{}, false, mid, v.Authority); got != v.DNSTxtValue {
+		t.Errorf("dns txt:\n got %q\nwant %q", got, v.DNSTxtValue)
+	}
+	if got, err := discovery.FormatHeader(v.Subject, mid, v.Authority); err != nil || got != v.HeaderValue {
+		t.Errorf("header:\n got %q (%v)\nwant %q", got, err, v.HeaderValue)
+	}
+	if got, err := discovery.DNSName(v.Subject); err != nil || got != v.DNSOwnerName {
+		t.Errorf("dns owner name: %q (%v)", got, err)
+	}
+	if got, err := discovery.AuthorityHost(v.Subject, v.Authority); err != nil || got != v.AuthorityHost {
+		t.Errorf("authority host: %q (%v)", got, err)
+	}
+	if u, err := discovery.DiscoveryURL(v.Subject, v.Authority); err != nil || u.String() != v.DiscoveryURL {
+		t.Errorf("discovery url: %q (%v)", u, err)
+	}
+
+	// The canonical bytes: parse the published ones and repack — the round trip
+	// is what proves the field's placement and encoding, not just its presence.
+	want, err := hex.DecodeString(v.CanonicalBytesHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := manifest.ParseCanonical(want, v.Subject)
+	if err != nil {
+		t.Fatalf("published delegated manifest must parse: %v", err)
+	}
+	if len(m.Authority) != 1 || m.Authority[0] != v.Authority {
+		t.Fatalf("parsed authority = %v", m.Authority)
+	}
+	if got, err := manifest.Pack(m); err != nil || !bytes.Equal(got, want) {
+		t.Errorf("delegated manifest does not repack to the published bytes (%v)", err)
+	}
+	if got := manifest.EncodeID(manifest.ManifestIDOf(want)); got != v.ManifestID {
+		t.Errorf("manifest id = %q, want %q", got, v.ManifestID)
+	}
+
+	// The transition form carries BOTH generations, in order.
+	tr, err := hex.DecodeString(v.TransitionBytesHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm, err := manifest.ParseCanonical(tr, v.Subject)
+	if err != nil {
+		t.Fatalf("transition manifest must parse: %v", err)
+	}
+	if len(tm.Authority) != 2 || tm.Authority[1] != v.Authority {
+		t.Fatalf("transition authority = %v", tm.Authority)
+	}
+
+	// IDN: an internationalized subject delegated to an ASCII authority, with
+	// every name in A-label form.
+	idn, err := hex.DecodeString(v.IDNCanonicalHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := manifest.ParseCanonical(idn, v.IDNSubject)
+	if err != nil {
+		t.Fatalf("IDN delegated manifest must parse: %v", err)
+	}
+	if im.Domain != v.IDNSubject {
+		t.Fatalf("IDN domain = %q", im.Domain)
+	}
+	if u, err := discovery.DiscoveryURL("пример.рф", v.Authority); err != nil || u.String() != v.IDNDiscoveryURL {
+		t.Errorf("IDN url: %q (%v)", u, err)
+	}
+
+	// The rejects stay rejected.
+	for name, rec := range v.Rejects {
+		if name == "why" {
+			continue
+		}
+		ads, skipped, err := discovery.ParseDNS(v.Subject, []string{rec})
+		if err == nil && len(ads) > 0 && len(skipped) == 0 {
+			t.Errorf("%s: %q must be rejected", name, rec)
+		}
+	}
+}

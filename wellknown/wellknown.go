@@ -107,7 +107,7 @@ func (t *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		t.serveIdentity(w, r)
 		return
 	}
-	pub, ok := t.lookup(r.Host)
+	pub, ok := t.lookup(r)
 	if !ok {
 		t.miss(w)
 		return
@@ -145,10 +145,37 @@ func (t *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(pub.Raw)
 }
 
-// lookup asks the publisher about each domain the host could mean, in the
-// protocol's order of authority.
-func (t *Handler) lookup(host string) (mailkey.Publication, bool) {
-	for _, d := range discovery.DomainCandidatesOf(host) {
+/*
+lookup decides WHICH domain's manifest this request is asking for.
+
+?d= names the subject explicitly, which is what lets one authority host serve
+many domains (delegated authority). It is a request for a NAMED domain, never
+a listing: the publisher answers only for what it actually hosts, so an
+unhosted (or hostile) d= gets the same 404 as any other stranger, and no
+request can enumerate what this server hosts.
+
+The subject is normalized before it reaches the publisher — one domain must
+not be answerable under two spellings — and an unparseable d= is refused
+rather than quietly falling back to the Host, because a malformed subject is
+a malformed request, not a request for something else.
+
+Without ?d= the host decides, exactly as before: this endpoint answers old
+resolvers (and hand-typed URLs) unchanged, and for a self-hosted domain that
+is the same manifest either way.
+*/
+func (t *Handler) lookup(r *http.Request) (mailkey.Publication, bool) {
+	if raw := r.URL.Query().Get(mailkey.SubjectQueryParam); raw != "" {
+		d, err := discovery.Normalize(raw)
+		if err != nil {
+			return mailkey.Publication{}, false
+		}
+		pub, ok := t.Publisher.CurrentManifest(d)
+		if !ok || len(pub.Raw) == 0 {
+			return mailkey.Publication{}, false
+		}
+		return pub, true
+	}
+	for _, d := range discovery.DomainCandidatesOf(r.Host) {
 		if pub, ok := t.Publisher.CurrentManifest(d); ok && len(pub.Raw) > 0 {
 			return pub, true
 		}
@@ -234,10 +261,24 @@ func (t *Handler) serveIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 	var raw []byte
 	found := false
-	for _, d := range discovery.DomainCandidatesOf(r.Host) {
+	if q := r.URL.Query().Get(mailkey.SubjectQueryParam); q != "" {
+		// Same subject rule as the manifest plane: an explicit ?d= is the
+		// question, and only a hosted domain gets an answer — a named domain,
+		// never a listing.
+		d, derr := discovery.Normalize(q)
+		if derr != nil {
+			t.miss(w)
+			return
+		}
 		if b, ok := ip.CurrentIdentityDoc(d); ok && len(b) > 0 {
 			raw, found = b, true
-			break
+		}
+	} else {
+		for _, d := range discovery.DomainCandidatesOf(r.Host) {
+			if b, ok := ip.CurrentIdentityDoc(d); ok && len(b) > 0 {
+				raw, found = b, true
+				break
+			}
 		}
 	}
 	if !found {

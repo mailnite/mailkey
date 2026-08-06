@@ -7,9 +7,11 @@
 package wellknown_test
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -365,5 +367,74 @@ func TestNotModifiedKeepsItsOwnProof(t *testing.T) {
 	}
 	if err := identity.Check(proof, "x.test", body); err != nil {
 		t.Fatalf("the 304's proof does not authenticate the cached body: %v", err)
+	}
+}
+
+/*
+TestSubjectQuerySelectsTheDomain pins the serving half of delegated authority:
+ONE authority host serves MANY domains, and ?d= says which.
+
+Four properties, each load-bearing:
+
+  - a hosted subject is served regardless of the Host header — that is what
+    makes mail.{primary} the authority for customer domains;
+  - an UNHOSTED subject 404s exactly like any stranger, so a request can name
+    a domain but never enumerate what this server hosts (the customer list
+    stays private);
+  - a malformed ?d= is refused rather than silently falling back to the Host:
+    a malformed subject is a malformed request, not a request for something
+    else;
+  - without ?d= the Host still decides, so old resolvers keep working
+    unchanged.
+*/
+func TestSubjectQuerySelectsTheDomain(t *testing.T) {
+	const authorityDomain = "primary.example"
+	const customer = "customer.example"
+	h, pub := newFixture(t, authorityDomain, customer)
+
+	get := func(host, query string) *httptest.ResponseRecorder {
+		url := "/.well-known/mail-key"
+		if query != "" {
+			url += "?d=" + query
+		}
+		r := httptest.NewRequest(http.MethodGet, url, nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	// The customer's manifest, served by the PRIMARY's host.
+	w := get("mail."+authorityDomain, customer)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delegated subject: %d", w.Code)
+	}
+	if !bytes.Equal(w.Body.Bytes(), pub.raw[customer]) {
+		t.Fatal("?d= must select the SUBJECT's manifest, not the host's")
+	}
+
+	// The host's own domain still works through the same query form.
+	if w := get("mail."+authorityDomain, authorityDomain); w.Code != http.StatusOK ||
+		!bytes.Equal(w.Body.Bytes(), pub.raw[authorityDomain]) {
+		t.Fatalf("self subject via ?d=: %d", w.Code)
+	}
+
+	// A domain this server does not host: the ordinary 404, no hint that it
+	// hosts anything else.
+	if w := get("mail."+authorityDomain, "stranger.example"); w.Code != http.StatusNotFound {
+		t.Fatalf("unhosted subject must 404, got %d", w.Code)
+	}
+
+	// Malformed subjects are refused outright — never a fallback to the Host.
+	for _, bad := range []string{"https://evil.example", "evil.example:443", "127.0.0.1", "*.example"} {
+		if w := get("mail."+authorityDomain, url.QueryEscape(bad)); w.Code != http.StatusNotFound {
+			t.Fatalf("d=%q must be refused, got %d", bad, w.Code)
+		}
+	}
+
+	// No ?d= at all: the Host decides, exactly as before delegation existed.
+	if w := get("mail."+authorityDomain, ""); w.Code != http.StatusOK ||
+		!bytes.Equal(w.Body.Bytes(), pub.raw[authorityDomain]) {
+		t.Fatalf("host-derived lookup must still work: %d", w.Code)
 	}
 }

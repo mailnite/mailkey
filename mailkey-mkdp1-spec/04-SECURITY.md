@@ -195,3 +195,30 @@ Logs should not contain:
 - decrypted email bodies;
 - entire messages merely to explain a header observation.
 
+## Delegated authority
+
+`a=` (§2/§3) lets an observation choose WHICH MKDP1 host is contacted for a
+domain. Two consequences, and the bounds on each.
+
+**Request bouncing.** A hostile record can name any domain as an authority, so
+a client can be made to send one fixed-path `GET` to any host that runs an
+MKDP1 endpoint. The request carries no attacker-chosen scheme, port, path,
+body or headers, and the response is discarded unless it passes §4.1 — so the
+gain is a bounded, uninteresting request. Implementations SHOULD nevertheless
+rate-limit and negatively cache per authority, so a record cannot be used to
+aim many clients at one host repeatedly.
+
+**Manifest re-serving.** Without consent, a manifest obtained from one
+authority could be re-served by another, which would let a former (or hostile)
+provider keep answering for a domain that moved. §4.1's check is what forbids
+it: the serving host must appear in the domain's OWN signed authority list,
+so leaving a provider is a matter of re-signing, not of hoping nobody replays.
+
+**What does not change.** `a=` never installs a key, never selects a manifest,
+and never contributes to a pin decision. The subject binding (§6) and the
+identity rules are evaluated exactly as before; delegation moves where bytes
+are served, never what they mean.
+
+**Enumeration.** The authority endpoint answers for a named subject only.
+Implementations MUST NOT offer a form that lists hosted domains: for a
+provider, that list is its customer list.

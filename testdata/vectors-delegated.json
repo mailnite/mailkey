@@ -1,0 +1,24 @@
+{
+  "authority": "provider.example",
+  "authority_host": "mail.provider.example",
+  "canonical_bytes_hex": "86a9617574686f7269747991b070726f76696465722e6578616d706c65a6646f6d61696eb0637573746f6d65722e6578616d706c65aa657870697265735f6174ce655d2b80a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c420070ac14a03d27d2574147cc3d2011f2fa89d01ee9654bb386b4d9194fe312d0ca2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
+  "discovery_url": "https://mail.provider.example/.well-known/mail-key?d=customer.example",
+  "dns_owner_name": "_mailkey.customer.example",
+  "dns_txt_value": "v=MKDP1; id=WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg; a=provider.example; mode=https",
+  "header_value": "v=MKDP1; d=customer.example; id=WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg; a=provider.example; mode=https",
+  "idn_canonical_bytes_hex": "86a9617574686f7269747991b070726f76696465722e6578616d706c65a6646f6d61696eb5786e2d2d653161666d6b66642e786e2d2d70316169aa657870697265735f6174ce655d2b80a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c42093cef0f05cb1f621a83986d99f84ab47d5e47684af4f767c17b0ad685664d126a2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
+  "idn_discovery_url": "https://mail.provider.example/.well-known/mail-key?d=xn--e1afmkfd.xn--p1ai",
+  "idn_dns_owner_name": "_mailkey.xn--e1afmkfd.xn--p1ai",
+  "idn_subject": "xn--e1afmkfd.xn--p1ai",
+  "manifest_id": "WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg",
+  "note": "Delegated authority: the subject keeps its own key; another domain's mail host serves it. See 02-MKDP1-PROTOCOL.md §2/§4 and §4.1.",
+  "rejects": {
+    "a_ip_literal": "v=MKDP1; id=WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg; a=127.0.0.1; mode=https",
+    "a_with_port": "v=MKDP1; id=WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg; a=provider.example:443; mode=https",
+    "a_with_scheme": "v=MKDP1; id=WJrR3eFwQrQTwCrVvVtVIoo0rzpjyDHFuCGiPg3ceLg; a=https://provider.example; mode=https",
+    "why": "each MUST be treated as a malformed record and ignored — never degraded to self-hosted"
+  },
+  "subject": "customer.example",
+  "transition_bytes_hex": "86a9617574686f7269747992b46e65772d70726f76696465722e6578616d706c65b070726f76696465722e6578616d706c65a6646f6d61696eb0637573746f6d65722e6578616d706c65aa657870697265735f6174ce655d2b80a96973737565645f6174ce6553f100a36b657984a3616c67a6783235353139a3656e63a961657332353667636da36b6964c420070ac14a03d27d2574147cc3d2011f2fa89d01ee9654bb386b4d9194fe312d0ca2706bc4200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20a176a54d4b445031",
+  "transition_manifest_id": "VjqemE2mcsyjxEMTgYHHDVHIIrcbF2z7R-wxPtHeSSY"
+}
