@@ -356,3 +356,68 @@ func TestIdentifierText(t *testing.T) {
 		}
 	}
 }
+
+/*
+TestCanonicalDomainIsEnforcedAtPack closes G6.
+
+The key identifier is SHA-256 over the domain's exact bytes, and every lookup
+normalizes to the IDNA A-label first. So a manifest packed with a U-label is
+self-consistent and permanently unusable: its kid is computed over bytes no
+resolver will ever compute, and the domain binding fails everywhere. It failed
+CLOSED — which is right — but as a mystery at the far end of the wire, on
+somebody else's server.
+
+Refusing at pack time moves the failure to the one place it can be fixed, and
+the same rule covers the delegated authority list, where a U-label entry would
+silently consent to a host no client would ever match.
+*/
+func TestCanonicalDomainIsEnforcedAtPack(t *testing.T) {
+	pk := make([]byte, 32)
+	for i := range pk {
+		pk[i] = byte(i + 1)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	canonical, err := mailkey.NormalizeDomain("пример.рф")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The A-label packs, and its kid is derived from those bytes.
+	good, err := manifest.New(canonical, now, now.Add(time.Hour), mailkey.AlgX25519, mailkey.EncAES256GCM, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manifest.Pack(good); err != nil {
+		t.Fatalf("an A-label domain must pack: %v", err)
+	}
+
+	// The U-label does not — even though it would otherwise be self-consistent.
+	bad := good
+	bad.Domain = "пример.рф"
+	bad.Key.Kid, err = manifest.KeyIDOf(bad.Domain, mailkey.AlgX25519, mailkey.EncAES256GCM, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manifest.Pack(bad); err == nil {
+		t.Fatal("a U-label domain must be refused at pack time — no resolver could ever validate it")
+	} else if !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("the refusal must name the reason: %v", err)
+	}
+
+	// The authority list is held to the same rule.
+	delegated := good
+	delegated.Authority = []string{"пример.рф"}
+	if _, err := manifest.Pack(delegated); err == nil {
+		t.Fatal("a U-label authority entry must be refused — it would consent to a host nobody matches")
+	}
+	delegated.Authority = []string{canonical}
+	if _, err := manifest.Pack(delegated); err != nil {
+		t.Fatalf("an A-label authority must pack: %v", err)
+	}
+
+	// And the bound: a list longer than the protocol allows is not a manifest.
+	delegated.Authority = []string{"a.test", "b.test", "c.test", "d.test", "e.test"}
+	if _, err := manifest.Pack(delegated); err == nil {
+		t.Fatalf("more than %d authority entries must be refused", mailkey.MaxAuthorityEntries)
+	}
+}
