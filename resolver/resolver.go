@@ -127,7 +127,10 @@ type call struct {
 	err  error
 }
 
-var _ mailkey.Resolver = (*Resolver)(nil)
+var (
+	_ mailkey.Resolver              = (*Resolver)(nil)
+	_ mailkey.IdentityChainResolver = (*Resolver)(nil)
+)
 
 // New builds a Resolver. It never returns an unsafe configuration: out-of-range
 // values are replaced with defaults rather than honoured.

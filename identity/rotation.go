@@ -217,6 +217,9 @@ func SignRevocation(domain string, revokedPriv, successorPriv ed25519.PrivateKey
 	if len(revokedPriv) != ed25519.PrivateKeySize {
 		return Statement{}, xerrors.New("sign revocation: the currently trusted identity's private key is required")
 	}
+	if len(successorPriv) != 0 && len(successorPriv) != ed25519.PrivateKeySize {
+		return Statement{}, xerrors.New("sign revocation: the successor private key is malformed")
+	}
 	s := Statement{
 		Type: RevocationType, Version: mailkey.Version, Domain: domain,
 		OldFP: revokedFP, NewAlg: Alg,

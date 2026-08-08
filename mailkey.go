@@ -573,6 +573,9 @@ type Store interface {
 	// verdict is reached BEFORE a manifest is allowed to become cached state:
 	// installing first would let a refused manifest be served from cache on the
 	// next send, bypassing the decision entirely.
+	//
+	// Failure is security-significant, not advisory: the fetched manifest MUST
+	// NOT be installed or returned for use unless this write succeeds.
 	SetIdentity(ctx context.Context, domain string, state IdentityState) error
 
 	// Capability reads the domain's transport latch. A domain never seen returns
@@ -591,6 +594,10 @@ type Store interface {
 	// but LastValidatedAt answers "when did this domain last actually work",
 	// which is what an operator needs when deciding whether a refusal is an
 	// attack or an outage.
+	//
+	// Failure MUST stop the fetched manifest from being installed or returned.
+	// Otherwise a successful authority fetch followed by a storage fault can be
+	// misread upstream as opportunistic "no key" and downgraded to plaintext.
 	MarkValidated(ctx context.Context, domain string, at time.Time) error
 	// SetMKDP1Disabled is the explicit administrator downgrade — the only
 	// operation that lifts the latch. Separate from SetPolicy because policy
@@ -644,7 +651,12 @@ returned a parsed, "checked" document would be one refactor away from someone
 trusting its check.
 */
 type IdentityChainResolver interface {
-	ResolveIdentityChain(ctx context.Context, domain string) ([]byte, error)
+	// authority is the same delegated authority DOMAIN already admitted by the
+	// caller for the manifest fetch ("" = subject-domain route). The chain and
+	// the manifest must be fetched through one routing decision; implementations
+	// validate the returned resource but do not decide whether an observation
+	// was trusted enough to select that route.
+	ResolveIdentityChain(ctx context.Context, domain, authority string) ([]byte, error)
 }
 
 /*

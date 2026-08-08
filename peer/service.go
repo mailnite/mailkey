@@ -601,7 +601,12 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 			}
 		}
 	}
-	res, err := s.resolver.Resolve(ctx, d, s.authorityHint(ctx, d))
+	// Capture the route once. If this response presents a different signer, the
+	// identity chain must be fetched through the same already-authorized
+	// authority—not through a second observation read that could change between
+	// the two requests.
+	authority := s.authorityHint(ctx, d)
+	res, err := s.resolver.Resolve(ctx, d, authority)
 	if err != nil {
 		if ferr := s.store.RecordFailure(ctx, d, err); ferr != nil {
 			return mailkey.Result{}, ferr
@@ -628,14 +633,24 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 	*/
 	prev, _ := s.store.GetPeer(ctx, d)
 	verdict := s.decide(prev, res)
-	if err := s.store.SetIdentity(ctx, d, ApplyIdentity(identityOf(prev), verdict, res, s.now())); err != nil && s.onError != nil {
-		s.onError(d, xerrors.Errorf("identity state: %w", err))
+	/*
+		Durability is part of acceptance, not telemetry.
+
+		The latch is written FIRST because a successful HTTPS fetch is already
+		evidence that this domain speaks MKDP1, even when its identity is refused.
+		If either write fails, returning a bare store error would let the outbound
+		adapter read it as "no key" and send plaintext. Return a REQUIRED hold and
+		stop before installing or returning the fetched manifest instead.
+
+		This deliberately permits one safe partial state: latch persisted, identity
+		not persisted. That state fails closed and can be retried. The inverse — a
+		pin without the downgrade latch — is never created by this path.
+	*/
+	if err := s.store.MarkValidated(ctx, d, res.FetchedAt); err != nil {
+		return mailkey.Result{}, s.persistenceHold(d, "capability latch", err)
 	}
-	// The domain answered over HTTPS. Latched even when the identity is refused:
-	// the claim is about the transport, and a refusal must never become the
-	// reason a later outage sends plaintext.
-	if err := s.store.MarkValidated(ctx, d, res.FetchedAt); err != nil && s.onError != nil {
-		s.onError(d, xerrors.Errorf("capability latch: %w", err))
+	if err := s.store.SetIdentity(ctx, d, ApplyIdentity(identityOf(prev), verdict, res, s.now())); err != nil {
+		return mailkey.Result{}, s.persistenceHold(d, "identity state", err)
 	}
 	if !verdict.AcceptFetched {
 		/*
@@ -650,7 +665,7 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 			missing proof or a replay; it can only explain a signer change.
 		*/
 		if verdict.Reason == "pinned/valid-proof-other-signer" {
-			if res2, ok := s.followRotation(ctx, d, prev, res); ok {
+			if res2, ok := s.followRotation(ctx, d, authority, prev, res); ok {
 				return res2, nil
 			}
 		}
@@ -720,6 +735,19 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 	return res, nil
 }
 
+// persistenceHold reports a trust-state write failure and, crucially, marks it
+// as encryption-required. The queue treats unclassified resolution failures as
+// opportunistic "no key" outcomes; allowing one of these errors to escape bare
+// would turn a database failure into a plaintext downgrade immediately after a
+// successful authority fetch.
+func (s *Service) persistenceHold(domain, state string, err error) error {
+	wrapped := xerrors.Errorf("%s: %w", state, err)
+	if s.onError != nil {
+		s.onError(domain, wrapped)
+	}
+	return mailkey.FailRequired(domain, wrapped)
+}
+
 /*
 followRotation walks a domain's published identity history from OUR pin toward
 the signer we just observed.
@@ -737,12 +765,12 @@ The rules that make it safe to run unattended:
   - Success moves the pin THROUGH the store and installs the manifest, so the
     next send takes the ordinary pinned path with no memory of the excursion.
 */
-func (s *Service) followRotation(ctx context.Context, d string, prev *mailkey.Peer, res mailkey.Result) (mailkey.Result, bool) {
+func (s *Service) followRotation(ctx context.Context, d, authority string, prev *mailkey.Peer, res mailkey.Result) (mailkey.Result, bool) {
 	cr, ok := s.resolver.(mailkey.IdentityChainResolver)
 	if !ok || prev == nil || len(prev.Identity.PinnedPublicKey) == 0 || res.Proof == nil {
 		return mailkey.Result{}, false
 	}
-	raw, err := cr.ResolveIdentityChain(ctx, d)
+	raw, err := cr.ResolveIdentityChain(ctx, d, authority)
 	if err != nil {
 		if s.onError != nil {
 			s.onError(d, xerrors.Errorf("identity chain: %w", err))

@@ -31,17 +31,21 @@ exactly as before.
 // chainResolver serves a fixed manifest plus a fixed identity document — the
 // authority as a sender sees it, both endpoints.
 type chainResolver struct {
-	res      mailkey.Result
-	doc      []byte
-	docErr   error
-	chainHit *int
+	res               mailkey.Result
+	doc               []byte
+	docErr            error
+	chainHit          *int
+	manifestAuthority string
+	identityAuthority string
 }
 
-func (c *chainResolver) Resolve(context.Context, string, string) (mailkey.Result, error) {
+func (c *chainResolver) Resolve(_ context.Context, _, authority string) (mailkey.Result, error) {
+	c.manifestAuthority = authority
 	return c.res, nil
 }
 
-func (c *chainResolver) ResolveIdentityChain(context.Context, string) ([]byte, error) {
+func (c *chainResolver) ResolveIdentityChain(_ context.Context, _, authority string) ([]byte, error) {
+	c.identityAuthority = authority
 	if c.chainHit != nil {
 		*c.chainHit++
 	}
@@ -115,6 +119,7 @@ func docFor(t *testing.T, dom string, activeSeed int, chain []identity.Statement
 func TestASignedRotationIsFollowedWithoutAHuman(t *testing.T) {
 	ctx := context.Background()
 	const dom = "example.com"
+	const delegated = "provider.example"
 	now := time.Unix(1750000000, 0).UTC()
 	fp1, pk1, priv1 := fpFor(t, dom, 1)
 	fp2, _, priv2 := fpFor(t, dom, 2)
@@ -130,6 +135,11 @@ func TestASignedRotationIsFollowedWithoutAHuman(t *testing.T) {
 		chainHit: &hits,
 	}
 	store := pinnedStore(t, dom, fp1, []byte(pk1), now)
+	if err := store.PutObservation(ctx, dom, mailkey.Observation{
+		Source: mailkey.SourceDNS, Authority: delegated, ObservedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	oldState, err := store.GetPeer(ctx, dom)
 	if err != nil {
 		t.Fatal(err)
@@ -165,6 +175,10 @@ func TestASignedRotationIsFollowedWithoutAHuman(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("the chain was fetched %d times; it is consulted only when the signer changes", hits)
+	}
+	if r.manifestAuthority != delegated || r.identityAuthority != delegated {
+		t.Fatalf("manifest/identity routes = %q/%q, want the same authorized delegation %q",
+			r.manifestAuthority, r.identityAuthority, delegated)
 	}
 	// The NEXT send takes the ordinary pinned path: no chain fetch at all.
 	if _, err := svc.ResolveForEncryption(ctx, dom); err != nil {

@@ -777,8 +777,10 @@ current-key pointer of §10.6.
 
 **P2 — durable lifecycle accounting.** Shared counters keyed by
 `(domain, kid)`, atomic increments on successful decryption, counter recovery
-across restarts, usage visible to every replica. Volume-triggered rotation is
-enabled only after this is verified in place — §10.5.
+across restarts, usage visible to every replica. Volume-triggered rotation MUST
+be bound to the observed `current_kid` and enabled only after those properties
+are verified — §10.5. Sender-side counters are separately keyed by peer `kid`;
+they may prompt refresh and never rotate a remote key (§10.3).
 
 **P3 — rotation and recovery.** Rotation and revocation statements, the identity
 resource and its bounding, recovery and break-glass, publisher self-check.

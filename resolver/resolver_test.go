@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/manifest"
 	"github.com/mailnite/mailkey/resolver"
 )
@@ -615,5 +616,52 @@ func TestDelegatedResolveAndConsent(t *testing.T) {
 	f.body = delegatedManifest(t, subject, []string{"new-primary.example", domain}, now)
 	if _, err := r.Resolve(context.Background(), subject, domain); err != nil {
 		t.Fatalf("a dual-authority manifest must be accepted from the old host too: %v", err)
+	}
+}
+
+// TestIdentityChainResolverUsesAuthorizedAuthority is the interface regression
+// for the previously unreachable automatic-rotation path. It calls the concrete
+// resolver through mailkey.IdentityChainResolver and proves the same delegated
+// authority shape as Resolve: TLS authenticates mail.<authority>, while ?d=
+// carries the pinned subject whose chain is requested.
+func TestIdentityChainResolverUsesAuthorizedAuthority(t *testing.T) {
+	const subject = "customer.example"
+	f := newAuthority(t) // certificate for mail.example.com
+	r := newResolver(t, f)
+	now := time.Now().UTC().Truncate(time.Second)
+	pk, _, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := identity.FingerprintOf(subject, pk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.body, err = identity.PackDoc(identity.Doc{
+		Domain: subject, ActiveFP: fp, ActivePK: pk, Alg: identity.Alg,
+		Status: identity.StatusActive, UpdatedAt: now, Authority: []string{domain},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPath, gotSubject string
+	f.handler = func(w http.ResponseWriter, req *http.Request) {
+		gotPath = req.URL.Path
+		gotSubject = req.URL.Query().Get(mailkey.SubjectQueryParam)
+		w.Header().Set("Content-Type", mailkey.MediaType)
+		_, _ = w.Write(f.body)
+	}
+
+	var chain mailkey.IdentityChainResolver = r
+	raw, err := chain.ResolveIdentityChain(context.Background(), subject, domain)
+	if err != nil {
+		t.Fatalf("delegated identity-chain resolve: %v", err)
+	}
+	if string(raw) != string(f.body) {
+		t.Fatal("identity-chain bytes changed during resolution")
+	}
+	if gotPath != identity.ResourcePath || gotSubject != subject {
+		t.Fatalf("identity request path/subject = %q/%q, want %q/%q",
+			gotPath, gotSubject, identity.ResourcePath, subject)
 	}
 }

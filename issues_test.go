@@ -138,7 +138,7 @@ func TestOnlyActionableConditionsAlert(t *testing.T) {
 		mailkey.IssueDowngradeBlocked, mailkey.IssueMailHeld,
 		// Only ever raised for an already-PINNED domain, so it is never the
 		// routine case: the operator pinned it to hear exactly this.
-		mailkey.IssueProofMissing, mailkey.IssueForeignSeal, mailkey.IssueRevoked,
+		mailkey.IssueProofMissing, mailkey.IssueRevoked,
 	} {
 		if !c.Alerts() {
 			t.Errorf("%s is worth waking someone for and does not alert", c)
@@ -146,6 +146,8 @@ func TestOnlyActionableConditionsAlert(t *testing.T) {
 	}
 	for _, c := range []mailkey.IssueCode{
 		mailkey.IssueRefreshFailed, mailkey.IssueReplay, mailkey.IssueCode(""),
+		// Legacy only: the identifiers behind it were never authenticated.
+		mailkey.IssueForeignSeal,
 		// AuthorityUnstable has its OWN notification where the instability is
 		// detected; alerting twice for one condition is how a category gets muted.
 		mailkey.IssueAuthorityUnstable,

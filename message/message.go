@@ -140,15 +140,15 @@ func StripReserved(raw []byte) []byte {
 }
 
 /*
-IsSealed reports whether raw actually CARRIES an MKDP1 envelope — framed as one
-AND parsing as one.
+IsSealed reports whether raw structurally carries an MKDP1 envelope — framed as
+one AND parsing as one.
 
-This is the proof-shaped question, and the one to ask wherever a claim of
-protection is recorded or shown to a person. IsEncrypted only reads two
-headers, which anyone can write; passing that test means "try to read this as
-MKDP1", never "this was protected". Forging THIS one requires producing a real
-envelope, and an envelope that was never sealed to the reader is one they
-cannot open — so it can never dress up readable plaintext as protected mail.
+This is a routing predicate, not authentication. Anyone can produce an envelope
+sealed to their own key while naming another receiver's domain or kid, and a
+known-kid envelope may still carry a modified ciphertext or tag. Use IsSealed to
+decide whether an open should be attempted; only a successful Open proves that
+the envelope and its authenticated metadata were protected for the key it
+names. Never derive a user-visible protection claim from IsSealed alone.
 */
 func IsSealed(raw []byte) bool {
 	_, err := EnvelopeOf(raw)
