@@ -595,7 +595,7 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 	if err := s.store.MarkValidated(ctx, d, res.FetchedAt); err != nil && s.onError != nil {
 		s.onError(d, xerrors.Errorf("capability latch: %w", err))
 	}
-	if !verdict.Encrypt {
+	if !verdict.AcceptFetched {
 		/*
 			A pinned domain answering under a DIFFERENT valid identity is the one
 			refusal the published history can settle: a legitimate rotation left
@@ -621,6 +621,21 @@ func (s *Service) resolve(ctx context.Context, d string, force, acceptUnpinned b
 		s.raise(ctx, d, issueOf(verdict.Reason), verdict.Alert)
 		if s.onError != nil {
 			s.onError(d, xerrors.Errorf("identity refused (%s): %s", verdict.Reason, verdict.Alert))
+		}
+		// Encrypt=true on a refusal means the previously accepted manifest is
+		// still usable — never that this response passed the identity check. Return
+		// that exact cached object and leave the refusal recorded. Conflating these
+		// two decisions used to install a stripped or differently signed response
+		// during the ordinary refresh window.
+		if verdict.Encrypt {
+			if rec, ok := Usable(prev, s.now()); ok {
+				return resultOf(rec, d)
+			}
+			// DecideIdentity received cachedUsable from this same peer snapshot, so
+			// reaching here means the cache became unusable during this call. Hold
+			// rather than falling through to the refused response.
+			return mailkey.Result{}, mailkey.FailRequired(d,
+				xerrors.New("the trusted cached manifest became unusable while refusing a fresh identity"))
 		}
 		if acceptUnpinned && overridable(verdict.Reason, res) {
 			/*

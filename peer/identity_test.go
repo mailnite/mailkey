@@ -96,6 +96,7 @@ func TestIdentityMatrix(t *testing.T) {
 		hasDNS      bool
 		cached      bool
 		wantEncrypt bool
+		wantFetched bool
 		wantStatus  mailkey.IdentityStatus
 		wantPin     bool
 		wantAlert   bool
@@ -103,42 +104,42 @@ func TestIdentityMatrix(t *testing.T) {
 	}{
 		{
 			name: "unpinned, no proof — legacy WebPKI, do not pin",
-			res:  result(t, dom, now, 0), wantEncrypt: true,
+			res:  result(t, dom, now, 0), wantEncrypt: true, wantFetched: true,
 			wantStatus: mailkey.IdentityUnpinned, wantReason: "unpinned/no-proof",
 		},
 		{
 			name: "unpinned, invalid proof — encrypt, do not pin, alert",
-			res:  broken, wantEncrypt: true, wantAlert: true,
+			res:  broken, wantEncrypt: true, wantFetched: true, wantAlert: true,
 			wantStatus: mailkey.IdentityUnpinned, wantReason: "unpinned/invalid-proof",
 		},
 		{
 			name: "unpinned, DNS fp present, proof absent — alert possible stripping",
 			res:  result(t, dom, now, 0), dnsFP: ourFP, hasDNS: true,
-			wantEncrypt: true, wantAlert: true,
+			wantEncrypt: true, wantFetched: true, wantAlert: true,
 			wantStatus: mailkey.IdentityUnpinned, wantReason: "unpinned/dns-fp-but-no-proof",
 		},
 		{
 			name: "unpinned, DNS matches a valid proof — pin it",
 			res:  result(t, dom, now, 1), dnsFP: ourFP, hasDNS: true,
-			wantEncrypt: true, wantPin: true,
+			wantEncrypt: true, wantFetched: true, wantPin: true,
 			wantStatus: mailkey.IdentityPinned, wantReason: "unpinned/pin-established-dns-corroborated",
 		},
 		{
 			name:        "unpinned, no DNS opinion, valid proof — pin it",
 			res:         result(t, dom, now, 1),
-			wantEncrypt: true, wantPin: true,
+			wantEncrypt: true, wantFetched: true, wantPin: true,
 			wantStatus: mailkey.IdentityPinned, wantReason: "unpinned/pin-established",
 		},
 		{
 			name: "unpinned, DNS disagrees with a valid proof — encrypt, WITHHOLD the pin",
 			res:  result(t, dom, now, 1), dnsFP: otherFP, hasDNS: true,
-			wantEncrypt: true, wantAlert: true,
+			wantEncrypt: true, wantFetched: true, wantAlert: true,
 			wantStatus: mailkey.IdentityContested, wantReason: "unpinned/dns-disagrees",
 		},
 		{
 			name: "pinned, valid proof from the pin — accept",
 			peer: pinnedPeer(t, dom, 1), res: result(t, dom, now, 1),
-			wantEncrypt: true, wantPin: true,
+			wantEncrypt: true, wantFetched: true, wantPin: true,
 			wantStatus: mailkey.IdentityPinned, wantReason: "pinned/valid-proof-from-pin",
 		},
 		{
@@ -163,7 +164,7 @@ func TestIdentityMatrix(t *testing.T) {
 			name: "pinned, DNS disagrees — keep the pin, alert, delivery unaffected",
 			peer: pinnedPeer(t, dom, 1), res: result(t, dom, now, 1),
 			dnsFP: otherFP, hasDNS: true,
-			wantEncrypt: true, wantAlert: true, wantPin: true,
+			wantEncrypt: true, wantFetched: true, wantAlert: true, wantPin: true,
 			wantStatus: mailkey.IdentityPinned, wantReason: "pinned/dns-disagrees",
 		},
 	}
@@ -176,6 +177,9 @@ func TestIdentityMatrix(t *testing.T) {
 			}
 			if v.Encrypt != tc.wantEncrypt {
 				t.Fatalf("encrypt = %v, want %v", v.Encrypt, tc.wantEncrypt)
+			}
+			if v.AcceptFetched != tc.wantFetched {
+				t.Fatalf("acceptFetched = %v, want %v", v.AcceptFetched, tc.wantFetched)
 			}
 			if v.Status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q", v.Status, tc.wantStatus)

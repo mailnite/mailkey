@@ -38,10 +38,16 @@ for pinning, and whether to pin it depends on corroboration.
 
 // Verdict is what a sender should do with a fetched manifest.
 type Verdict struct {
-	// Encrypt reports whether this manifest may be used to seal mail. False
-	// means HOLD — never plaintext. A domain that has ever answered over HTTPS
-	// keeps that guarantee even while its identity is refused.
+	// Encrypt reports whether mail may still be sealed: either with this fetched
+	// manifest, when AcceptFetched is true, or with the previously accepted cache.
+	// False means HOLD — never plaintext. Keeping this separate from
+	// AcceptFetched is essential: a refused response must not become installable
+	// merely because the trusted cached manifest remains usable.
 	Encrypt bool
+	// AcceptFetched reports whether the manifest in the fetch result passed the
+	// identity decision and may be installed. False with Encrypt=true means
+	// REFUSE THIS RESPONSE and use the trusted cached manifest instead.
+	AcceptFetched bool
 	// Pin is the identity to establish or keep. Empty when nothing is pinned.
 	Pin      mailkey.Fingerprint
 	HasPin   bool
@@ -93,7 +99,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 	// --- pinned rows --------------------------------------------------------
 	case pinned && proofValid && res.Proof.Fingerprint == cur.Fingerprint:
 		out := Verdict{
-			Encrypt: true, Pin: cur.Fingerprint, HasPin: true,
+			Encrypt: true, AcceptFetched: true, Pin: cur.Fingerprint, HasPin: true,
 			Status: mailkey.IdentityPinned, Reason: "pinned/valid-proof-from-pin",
 		}
 		if hasDNSFP && dnsFP != cur.Fingerprint {
@@ -139,7 +145,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// pin, and alert. Pinning here would let a broken or hostile authority
 		// choose the anchor.
 		return Verdict{
-			Encrypt: true, Status: cur.Status,
+			Encrypt: true, AcceptFetched: true, Status: cur.Status,
 			Alert:  "this domain served a malformed identity proof (" + res.ProofError + "); encrypting without establishing a pin",
 			Reason: "unpinned/invalid-proof",
 		}
@@ -149,7 +155,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// an intermediary stripped it or the deployment is inconsistent. Both
 		// are worth saying; neither changes what we send.
 		return Verdict{
-			Encrypt: true, Status: cur.Status,
+			Encrypt: true, AcceptFetched: true, Status: cur.Status,
 			Alert:  "DNS advertises an identity fingerprint for this domain but the authority served no proof — the proof may have been stripped in transit, or the deployment is inconsistent",
 			Reason: "unpinned/dns-fp-but-no-proof",
 		}
@@ -157,7 +163,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 	case !proofValid:
 		// An unsigned domain. Legacy MKDP1, and the majority case during
 		// adoption. Nothing to pin, nothing to alert about.
-		return Verdict{Encrypt: true, Status: cur.Status, Reason: "unpinned/no-proof"}
+		return Verdict{Encrypt: true, AcceptFetched: true, Status: cur.Status, Reason: "unpinned/no-proof"}
 
 	case hasDNSFP && dnsFP != res.Proof.Fingerprint:
 		// A valid proof the DNS channel disagrees with. Encrypt — the manifest
@@ -166,7 +172,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// permanent. Requiring them to also control the observed DNS channel is
 		// the entire value of unauthenticated corroboration.
 		return Verdict{
-			Encrypt: true, Status: mailkey.IdentityContested,
+			Encrypt: true, AcceptFetched: true, Status: mailkey.IdentityContested,
 			Contest: fmt.Sprintf("HTTPS signs with %s, DNS advertises %s", short(res.Proof.Fingerprint), short(dnsFP)),
 			Alert: "Message encrypted using a WebPKI-authenticated but unpinned identity. " +
 				"DNS advertised a different identity. Persistent pinning was withheld.",
@@ -177,7 +183,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// A valid proof, and either DNS corroborates it or DNS says nothing.
 		// This is where a pin is born.
 		out := Verdict{
-			Encrypt: true, Pin: res.Proof.Fingerprint, HasPin: true,
+			Encrypt: true, AcceptFetched: true, Pin: res.Proof.Fingerprint, HasPin: true,
 			Status: mailkey.IdentityPinned, Reason: "unpinned/pin-established",
 		}
 		if hasDNSFP {
@@ -234,7 +240,7 @@ func checkReplay(cur mailkey.IdentityState, res mailkey.Result) (Verdict, bool) 
 		// reports instability for a human; it does not tie-break, and it does
 		// not punish.
 		return Verdict{
-			Encrypt: true, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
+			Encrypt: true, AcceptFetched: true, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
 			Status: cur.Status,
 			Alert:  "the authority served two different manifests carrying the same issue time — the authority is unstable",
 			Reason: "replay/same-issued-different-id",
@@ -281,7 +287,7 @@ func ApplyIdentity(st mailkey.IdentityState, v Verdict, res mailkey.Result, now 
 	// The replay watermark advances only on a manifest this sender ACCEPTED.
 	// Advancing it on a refused response would let one rejected replay raise the
 	// bar against the genuine newer manifest that follows.
-	if v.Encrypt && !res.Manifest.IssuedAt.IsZero() && res.Manifest.IssuedAt.After(st.LastVerifiedIssuedAt) {
+	if v.AcceptFetched && !res.Manifest.IssuedAt.IsZero() && res.Manifest.IssuedAt.After(st.LastVerifiedIssuedAt) {
 		st.LastVerifiedIssuedAt = res.Manifest.IssuedAt
 		st.LastVerifiedManifestID = res.ManifestID
 	}
