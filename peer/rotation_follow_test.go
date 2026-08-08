@@ -210,6 +210,50 @@ func TestAChainThatDoesNotReachTheSignerMovesNothing(t *testing.T) {
 	}
 }
 
+// TestSuccessorOnlyRevocationCannotInstallItsSigner exercises C-05 through the
+// complete refresh path. The attacker serves a manifest signed by identity 2
+// and a revocation that names the victim's pin as old_fp but is signed only by
+// identity 2. The chain must fail before SetIdentity or InstallManifest can
+// move durable trust or install the attacker's X25519 key.
+func TestSuccessorOnlyRevocationCannotInstallItsSigner(t *testing.T) {
+	ctx := context.Background()
+	const dom = "example.com"
+	now := time.Unix(1750000000, 0).UTC()
+	fp1, pk1, _ := fpFor(t, dom, 1)
+	fp2, pk2, priv2 := fpFor(t, dom, 2)
+
+	forged, err := identity.SignStatement(identity.Statement{
+		Type: identity.RevocationType, Version: mailkey.Version, Domain: dom,
+		OldFP: fp1, NewFP: fp2, NewAlg: identity.Alg, NewPK: pk2,
+		NotBefore: now, CreatedAt: now, ExpiresAt: now.Add(10 * 365 * 24 * time.Hour),
+		Reason: "old key unavailable",
+	}, nil, priv2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &chainResolver{
+		res: realResult(t, dom, now, 2),
+		doc: docFor(t, dom, 2, []identity.Statement{forged}, now),
+	}
+	store := pinnedStore(t, dom, fp1, []byte(pk1), now)
+	svc := peer.NewService(r, store, peer.Options{Now: func() time.Time { return now }})
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.ResolveForEncryption(ctx, dom); !errors.Is(err, mailkey.ErrEncryptionRequired) {
+		t.Fatalf("successor-only revocation did not hold delivery: %v", err)
+	}
+	p, err := store.GetPeer(ctx, dom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Identity.Status != mailkey.IdentityPinned || p.Identity.Fingerprint != fp1 {
+		t.Fatalf("successor-only revocation moved durable trust: %+v", p.Identity)
+	}
+	if p.Effective != nil {
+		t.Fatal("the attacker's manifest became effective")
+	}
+}
+
 // A revoked identity holds the mail and says so on the domain's record. The one
 // thing a chain can say that is worse than "stranger".
 func TestARevokedIdentityHoldsAndIsRecorded(t *testing.T) {

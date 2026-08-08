@@ -24,13 +24,13 @@ that nothing UNAUTHENTICATED may move it — not DNS, not a fresh manifest, not 
 absence of one. A legitimate identity change is therefore its own signed object,
 and this file is that object and its verification.
 
-The construction that matters is the DOUBLE signature. The old key authorizes the
-transition; the new key proves possession. Either alone is a complete break:
-
-  - old only — a stolen old key installs an attacker's identity, which is the
-    exact compromise a rotation is supposed to be able to recover FROM;
-  - new only — anyone who can serve the resource claims succession, and pinning
-    reduces to trusting the transport again.
+The construction that matters is the division of authority. The old key
+AUTHORIZES the transition; the new key only proves possession. A new-key
+signature can never substitute for authorization from the currently trusted
+identity. Requiring proof of possession prevents installing an unusable or
+misconfigured successor, but it does not recover from compromise of the old
+key: an attacker holding that key can authorize and possess a key of its own.
+Recovery from that event requires the separate trust path in spec §8.
 
 Ordering comes from the signatures and not_before, never from comparing fields.
 The seq failure MKDP1 was created to remove was not that a counter existed but
@@ -84,9 +84,9 @@ type Statement struct {
 	Reason string
 
 	// OldSignature is by the identity being replaced or revoked; NewSignature by
-	// the one taking effect. A rotation requires BOTH. A revocation requires
-	// either, since it may be issued by the revoked identity itself (the
-	// ordinary case) or by its successor (when the old key is already gone).
+	// the one taking effect. Every statement requires OldSignature. A statement
+	// that introduces NewPK also requires NewSignature as proof of possession.
+	// NewSignature never authorizes its own introduction.
 	OldSignature []byte
 	NewSignature []byte
 }
@@ -204,20 +204,18 @@ func SignRotation(domain string, oldPriv, newPriv ed25519.PrivateKey, notBefore,
 }
 
 /*
-SignRevocation withdraws an identity.
+SignRevocation withdraws an identity. revokedPriv is required because only the
+currently trusted identity can authorize either its withdrawal or a successor.
+successorPriv is optional; when present it both names the successor and proves
+possession of that key.
 
-successorPriv is optional. A revocation issued by the identity itself is the
-ordinary case; one issued by a successor exists because the reason for revoking
-is often that the old key is no longer usable — and a revocation nobody can issue
-is a revocation that never happens.
-
-At least one key is required. A statement with neither signature says "stop
-trusting this" on nobody's authority, which is a denial-of-service anyone could
-mount against any domain.
+A missing old key is a recovery event, not authority for an arbitrary new key to
+authorize itself. It must use the separately pre-authorized recovery root or the
+audited administrator procedure in spec §8.
 */
 func SignRevocation(domain string, revokedPriv, successorPriv ed25519.PrivateKey, reason string, createdAt, expiresAt time.Time, revokedFP mailkey.Fingerprint) (Statement, error) {
-	if len(revokedPriv) != ed25519.PrivateKeySize && len(successorPriv) != ed25519.PrivateKeySize {
-		return Statement{}, xerrors.New("sign revocation: the revoked identity's key or a successor's key is required")
+	if len(revokedPriv) != ed25519.PrivateKeySize {
+		return Statement{}, xerrors.New("sign revocation: the currently trusted identity's private key is required")
 	}
 	s := Statement{
 		Type: RevocationType, Version: mailkey.Version, Domain: domain,
@@ -225,14 +223,16 @@ func SignRevocation(domain string, revokedPriv, successorPriv ed25519.PrivateKey
 		CreatedAt: createdAt, NotBefore: createdAt, ExpiresAt: expiresAt,
 		Reason: reason,
 	}
-	if len(revokedPriv) == ed25519.PrivateKeySize {
-		revokedPK := revokedPriv.Public().(ed25519.PublicKey)
-		fp, err := FingerprintOf(domain, revokedPK)
-		if err != nil {
-			return Statement{}, err
-		}
-		s.OldFP = fp
+	revokedPK := revokedPriv.Public().(ed25519.PublicKey)
+	fp, err := FingerprintOf(domain, revokedPK)
+	if err != nil {
+		return Statement{}, err
 	}
+	var zero mailkey.Fingerprint
+	if revokedFP != zero && revokedFP != fp {
+		return Statement{}, xerrors.New("sign revocation: revoked fingerprint does not match the currently trusted key")
+	}
+	s.OldFP = fp
 	if len(successorPriv) == ed25519.PrivateKeySize {
 		successorPK := successorPriv.Public().(ed25519.PublicKey)
 		fp, err := FingerprintOf(domain, successorPK)
@@ -245,9 +245,7 @@ func SignRevocation(domain string, revokedPriv, successorPriv ed25519.PrivateKey
 	if err != nil {
 		return Statement{}, err
 	}
-	if len(revokedPriv) == ed25519.PrivateKeySize {
-		s.OldSignature = ed25519.Sign(revokedPriv, msg)
-	}
+	s.OldSignature = ed25519.Sign(revokedPriv, msg)
 	if len(successorPriv) == ed25519.PrivateKeySize {
 		s.NewSignature = ed25519.Sign(successorPriv, msg)
 	}

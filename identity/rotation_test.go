@@ -46,11 +46,15 @@ func rotate(t *testing.T, oldPriv, newPriv ed25519.PrivateKey, notBefore time.Ti
 TestBothSignaturesAreRequired is the construction, and each half of it stops a
 complete break of pinning.
 
-The OLD signature alone: a stolen old key installs an attacker's identity — the
-exact compromise a rotation is supposed to let a domain recover FROM.
+The OLD signature authorizes the transition but does not prove that the
+successor key is usable or possessed by the publisher.
 
 The NEW signature alone: anyone who can serve the resource claims succession, and
 pinning collapses back into trusting the transport.
+
+Neither half is a recovery mechanism for compromise of the old key. An attacker
+holding it can create and possess a new key too; recovery needs a separate trust
+root or an audited administrator action.
 */
 func TestBothSignaturesAreRequired(t *testing.T) {
 	oldPK, oldPriv, _ := keypair(t)
@@ -246,16 +250,13 @@ func TestTheChainIsBounded(t *testing.T) {
 	}
 }
 
-/*
-TestRevocationMayComeFromEitherAuthority.
-
-A revocation is often needed precisely BECAUSE the old key is gone — stolen,
-lost, or destroyed — so requiring the revoked identity to sign its own
-withdrawal would make the case that matters most impossible to express.
-*/
-func TestRevocationMayComeFromEitherAuthority(t *testing.T) {
+// TestSuccessorCannotAuthorizeItsOwnInstallation is the C-05 exploit
+// regression. The attacker knows the victim's public fingerprint, introduces
+// its own NewPK, and signs only with that new key. Proof of possessing an
+// attacker-chosen successor is not authorization from the current pin.
+func TestSuccessorCannotAuthorizeItsOwnInstallation(t *testing.T) {
 	oldPK, oldPriv, oldFP := keypair(t)
-	_, successorPriv, _ := keypair(t)
+	newPK, successorPriv, newFP := keypair(t)
 
 	self, err := identity.SignRevocation(dom, oldPriv, nil, "key compromise", base, base.Add(10*365*24*time.Hour), oldFP)
 	if err != nil {
@@ -265,15 +266,30 @@ func TestRevocationMayComeFromEitherAuthority(t *testing.T) {
 		t.Fatalf("an identity could not revoke itself: %v", err)
 	}
 
-	bySuccessor, err := identity.SignRevocation(dom, nil, successorPriv, "old key destroyed", base, base.Add(10*365*24*time.Hour), oldFP)
+	if _, err := identity.SignRevocation(dom, nil, successorPriv, "old key destroyed", base, base.Add(10*365*24*time.Hour), oldFP); err == nil {
+		t.Fatal("the safe builder produced a successor-authorized revocation")
+	}
+	forged, err := identity.SignStatement(identity.Statement{
+		Type: identity.RevocationType, Version: mailkey.Version, Domain: dom,
+		OldFP: oldFP, NewFP: newFP, NewAlg: identity.Alg, NewPK: newPK,
+		NotBefore: base, CreatedAt: base, ExpiresAt: base.Add(10 * 365 * 24 * time.Hour),
+		Reason: "old key destroyed",
+	}, nil, successorPriv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := identity.VerifyStatement(bySuccessor, oldPK); err != nil {
-		t.Fatalf("a successor could not revoke a key that is already gone: %v", err)
+	if err := identity.VerifyStatement(forged, oldPK); err == nil {
+		t.Fatal("a successor-only revocation authorized the key that signed it")
+	}
+	walk, err := identity.WalkChain(oldFP, oldPK, []identity.Statement{forged}, base.Add(time.Hour))
+	if !errors.Is(err, identity.ErrChainBroken) {
+		t.Fatalf("successor-only revocation did not break the chain: %v", err)
+	}
+	if walk.Applied != 0 || walk.Fingerprint != oldFP {
+		t.Fatal("successor-only revocation moved the pin before it was rejected")
 	}
 
-	// But nobody's authority is not an authority.
+	// Nobody's authority is not an authority either.
 	unsigned := self
 	unsigned.OldSignature, unsigned.NewSignature = nil, nil
 	if err := identity.VerifyStatement(unsigned, oldPK); err == nil {
@@ -306,14 +322,20 @@ func TestRevocationIsReportedNotSilentlyTreatedAsNoKey(t *testing.T) {
 	}
 }
 
-// A revocation naming a successor both withdraws the old identity and
-// introduces the new one — the successor is emphatically NOT revoked.
+// A revocation naming a successor may move the pin only when the old identity
+// authorizes it and the successor proves possession — the same division of
+// authority as an ordinary rotation.
 func TestARevocationWithASuccessorMovesThePin(t *testing.T) {
 	pk1, priv1, fp1 := keypair(t)
 	_, priv2, fp2 := keypair(t)
 	rev, err := identity.SignRevocation(dom, priv1, priv2, "planned replacement", base, base.Add(10*365*24*time.Hour), fp1)
 	if err != nil {
 		t.Fatal(err)
+	}
+	withoutPossession := rev
+	withoutPossession.NewSignature = nil
+	if err := identity.VerifyStatement(withoutPossession, pk1); err == nil {
+		t.Fatal("a revocation introduced a successor that never proved possession")
 	}
 	got, err := identity.WalkChain(fp1, pk1, []identity.Statement{rev}, base.Add(time.Hour))
 	if err != nil {

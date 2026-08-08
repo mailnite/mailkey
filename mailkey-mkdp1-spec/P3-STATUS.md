@@ -30,22 +30,22 @@ shape because they answer the same question — may this identity still be
 trusted, and what replaces it — and one shape means a verifier walks one chain
 instead of reconciling two orderings.
 
-**The double signature is the whole thing.** Each half stops a complete break of
-pinning:
-
-- old signature only → a stolen old key installs an attacker's identity, which
-  is the exact compromise a rotation is supposed to let a domain recover FROM;
-- new signature only → anyone who can serve the resource claims succession, and
-  pinning collapses back into trusting the transport.
+**The signatures have different authority.** The old signature authorizes a
+successor. The new signature proves possession of the authorized successor key;
+it can never authorize its own introduction. This prevents a transport attacker
+from claiming succession and prevents installation of an unpossessed key. It
+does not recover from compromise of the old key: an attacker holding it can
+generate and possess a new key too, so that event requires a separate recovery
+trust path.
 
 `VerifyStatement` requires both for a rotation. Teeth-verified in both
 directions.
 
-**A revocation needs either.** It is often needed precisely BECAUSE the old key
-is gone — stolen, lost, destroyed — so requiring the revoked identity to sign its
-own withdrawal would make the case that matters most impossible to express. But
-neither is not an authority: an unsigned revocation would let anyone withhold any
-domain's identity.
+**A revocation never accepts successor-only authority.** A terminal revocation
+requires the current old key. A revocation that introduces a successor requires
+both old-key authorization and new-key proof of possession. If the old key is
+gone, recovery is an out-of-band or separately pre-authorized trust decision;
+the key named by the same statement cannot appoint itself.
 
 ## Verification rules
 

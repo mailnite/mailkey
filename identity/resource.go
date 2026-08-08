@@ -116,9 +116,9 @@ expected fields, no more and no less.
 Fail-closed on an unknown field is the whole reason this resource may use a new
 schema — there is no deployed parser to stay compatible with, and the one thing
 it must never do is let something be smuggled past a verifier that shrugged at
-it. The signatures are optional as FIELDS (a revocation carries one, not two)
-and are checked as SIGNATURES by VerifyStatement, where the rule about how many
-are required lives.
+it. The signatures are optional as FIELDS (a terminal revocation carries only
+the old signature) and are checked as SIGNATURES by VerifyStatement, where the
+rule about how many are required lives.
 */
 func unpackStatement(v value.Value) (Statement, error) {
 	m, err := asMap(v, "identity statement")

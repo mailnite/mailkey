@@ -77,12 +77,30 @@ func VerifyStatement(s Statement, oldPK ed25519.PublicKey) error {
 		return err
 	}
 
+	// The caller's trusted key must be the identity the statement claims to
+	// descend from. WalkChain already selects on OldFP; checking again makes
+	// VerifyStatement safe as a public entry point rather than only as an
+	// implementation detail of the walker.
+	if len(oldPK) != ed25519.PublicKeySize {
+		return xerrors.New("identity statement: the currently trusted public key is missing or malformed")
+	}
+	oldFP, err := FingerprintOf(s.Domain, oldPK)
+	if err != nil {
+		return err
+	}
+	if oldFP != s.OldFP {
+		return xerrors.New("identity statement: old_fp does not match the currently trusted identity")
+	}
+
 	// The new identity, when one is named, must be the one it claims to be.
+	if len(s.NewPK) != 0 && len(s.NewPK) != ed25519.PublicKeySize {
+		return xerrors.New("identity statement: new_pk is the wrong length")
+	}
+	if s.NewAlg != Alg {
+		return xerrors.Errorf("identity statement: new_alg %q, want %q", s.NewAlg, Alg)
+	}
 	hasNew := len(s.NewPK) == ed25519.PublicKeySize
 	if hasNew {
-		if s.NewAlg != Alg {
-			return xerrors.Errorf("identity statement: new_alg %q, want %q", s.NewAlg, Alg)
-		}
 		want, ferr := FingerprintOf(s.Domain, s.NewPK)
 		if ferr != nil {
 			return ferr
@@ -90,26 +108,35 @@ func VerifyStatement(s Statement, oldPK ed25519.PublicKey) error {
 		if want != s.NewFP {
 			return xerrors.New("identity statement: new_fp does not match new_pk — the statement names an identity it does not carry")
 		}
+	} else {
+		var zero mailkey.Fingerprint
+		if s.NewFP != zero || len(s.NewSignature) != 0 {
+			return xerrors.New("identity statement: successor fields are present without new_pk")
+		}
 	}
 
-	oldOK := len(oldPK) == ed25519.PublicKeySize && len(s.OldSignature) == ed25519.SignatureSize &&
+	oldOK := len(s.OldSignature) == ed25519.SignatureSize &&
 		ed25519.Verify(oldPK, msg, s.OldSignature)
 	newOK := hasNew && len(s.NewSignature) == ed25519.SignatureSize &&
 		ed25519.Verify(s.NewPK, msg, s.NewSignature)
 
 	if s.IsRevocation() {
-		// Either authority suffices: the identity withdrawing itself, or the
-		// successor withdrawing it. A revocation is often needed precisely
-		// because the old key is gone, and one that nobody can issue is one
-		// that never happens.
-		if !oldOK && !newOK {
-			return xerrors.New("identity revocation: neither the revoked identity nor a successor signed it")
+		// Withdrawal and succession are both trust decisions. Only the
+		// currently trusted old identity can authorize them. A successor's
+		// signature is proof that it possesses NewPK, never permission for an
+		// otherwise arbitrary key to introduce itself.
+		if !oldOK {
+			return xerrors.New("identity revocation: the currently trusted identity did not authorize this statement")
+		}
+		if hasNew && !newOK {
+			return xerrors.New("identity revocation: the successor did not prove possession of its key")
 		}
 		return nil
 	}
-	// A rotation requires BOTH. The old signature alone would let a stolen old
-	// key install an attacker's identity; the new signature alone would let
-	// anyone who can serve the resource claim a succession.
+	// A rotation requires BOTH. The old signature authorizes the transition;
+	// the new signature proves possession. The latter can never replace the
+	// former, and neither signature is a recovery mechanism for old-key
+	// compromise.
 	if !oldOK {
 		return xerrors.New("identity rotation: the old identity did not authorize this transition")
 	}
@@ -203,9 +230,9 @@ func WalkChain(pin mailkey.Fingerprint, pinPK ed25519.PublicKey, chain []Stateme
 		if s.IsRevocation() {
 			out.Revoked, out.Reason = true, s.Reason
 			if len(s.NewPK) == ed25519.PublicKeySize {
-				// A revocation naming a successor both withdraws the old
-				// identity and introduces the new one, so the walk continues
-				// from there — and the successor is NOT revoked.
+				// VerifyStatement required authorization from the old key and
+				// proof of possession from this successor. Only after both may
+				// the statement withdraw the old identity and advance the pin.
 				out.Fingerprint, out.PublicKey = s.NewFP, s.NewPK
 				out.Applied++
 				out.Revoked, out.Reason = false, ""

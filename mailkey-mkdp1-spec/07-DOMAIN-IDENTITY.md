@@ -283,9 +283,12 @@ The statement is signed TWICE over
 - `new_signature` — by the NEW identity key, proving possession of the new
   private key.
 
-A verifier MUST require both. The old signature alone would let a stolen old key
-install an attacker's identity; the new signature alone would let anyone claim a
-succession.
+A verifier MUST require both. `old_signature` is the authorization;
+`new_signature` is proof that the authorized successor key is actually
+possessed. A new signature alone would let anyone claim succession. Requiring
+both does NOT recover from compromise of the old private key: an attacker who
+holds it can generate and possess a new key too. That event requires the
+separate recovery trust path in §8.
 
 A client MAY accept a new identity ONLY through:
 
@@ -305,10 +308,22 @@ value comparison.
 ### 5.1 Revocation
 
 A revocation statement uses the same construction with
-`"type": "mailkey-identity-revocation-v1"` and a `reason`, signed by the
-identity being revoked or by its successor. A revocation MUST remain servable
-after the revoked identity's manifests have expired: "stop using this" has to
-outlive the thing it refers to.
+`"type": "mailkey-identity-revocation-v1"` and a `reason`.
+
+- A terminal revocation with no successor MUST carry a valid `old_signature`
+  from the currently trusted identity.
+- A revocation that introduces `new_pk` MUST carry both a valid
+  `old_signature` and a valid `new_signature`, with the same authorization and
+  proof-of-possession roles as a rotation.
+- A `new_signature` alone MUST NOT authorize the revocation or introduce its
+  own key. A verifier MUST reject that statement without moving the pin.
+
+An already trusted successor may revoke itself by signing as the CURRENT
+identity (`old_signature`). Loss of the old key does not make an arbitrary
+successor authoritative; it invokes §8 recovery.
+
+A revocation MUST remain servable after the revoked identity's manifests have
+expired: "stop using this" has to outlive the thing it refers to.
 
 ### 5.2 Bounding the chain
 
@@ -474,6 +489,11 @@ provide all three of:
 
 Without these, one lost identity key permanently breaks a domain's
 correspondence with everyone who pinned it.
+
+Absent a separately pre-authorized recovery root, loss or compromise of the
+current identity key has no automatic cryptographic recovery. A key introduced
+inside the recovery statement cannot authorize itself; the sender-side audited
+break-glass procedure is the final trust decision.
 
 ## 9. Publisher self-check
 

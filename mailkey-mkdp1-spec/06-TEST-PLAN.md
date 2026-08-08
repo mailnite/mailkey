@@ -153,7 +153,12 @@ Also verify:
   evaluated;
 - copying a current `issued_at` cannot authorize a missing or different signer;
 - a verified identity rotation starts a new replay watermark for the successor
-  identity rather than inheriting the predecessor's timestamp.
+  identity rather than inheriting the predecessor's timestamp;
+- a successor-only revocation whose `old_fp` names the current pin and whose
+  `new_pk` signs the statement is rejected without moving the pin;
+- a terminal revocation requires the current old key;
+- a revocation that introduces a successor requires old-key authorization and
+  new-key proof of possession.
 
 ## 6. Peer lifecycle tests
 
