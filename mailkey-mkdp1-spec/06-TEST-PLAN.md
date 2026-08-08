@@ -131,7 +131,17 @@ B becomes effective atomically; A becomes historical.
 
 Repeated valid HTTPS responses alternate A/B/A/B within the warning window.
 The system records an authority instability warning without inventing an
-ordering rule.
+ordering rule. A response with the same `issued_at` and a different
+`manifest_id` does not replace the effective manifest; a usable cached manifest
+continues to serve encryption, otherwise the sender holds.
+
+Also verify:
+
+- the signer is authorized against the established pin before replay fields are
+  evaluated;
+- copying a current `issued_at` cannot authorize a missing or different signer;
+- a verified identity rotation starts a new replay watermark for the successor
+  identity rather than inheriting the predecessor's timestamp.
 
 ## 6. Peer lifecycle tests
 
@@ -208,4 +218,3 @@ Before tagging MKDP1:
 - exact existing envelope crypto vectors are published and verified;
 - upgrade tests prove old `kid` mappings remain decryptable;
 - Peers UI behavior matches the documented source and conflict semantics.
-

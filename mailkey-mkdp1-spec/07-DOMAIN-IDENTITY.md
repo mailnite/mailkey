@@ -400,12 +400,18 @@ last_verified_manifest_id
 
 and then:
 
+- the signer MUST first be authorized by the §6.2 identity matrix (including an
+  authorized rotation when the signer changed); replay fields are ordering
+  evidence and MUST NOT authenticate or bypass a signer;
 - an older `issued_at` than the effective manifest is a ROLLBACK alert and MUST
   NOT replace the newer effective manifest;
 - two different `manifest_id` values carrying the same `issued_at` are an
-  authority-instability alert;
+  authority-instability alert and the newly fetched manifest MUST NOT replace
+  the effective manifest;
 - an expired manifest is never eligible for new encryption;
-- a cached newer valid manifest wins over an older HTTPS response.
+- a valid cached manifest wins over an older, expired, or same-time ambiguous
+  HTTPS response; without a usable cache the sender MUST hold rather than use
+  the refused response.
 
 A later protocol version MAY add a signed monotonic epoch or a signed
 `previous_manifest_id`. The detached bridge MUST NOT add an unsigned sequence

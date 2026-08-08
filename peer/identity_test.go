@@ -258,7 +258,7 @@ func TestReplayProtection(t *testing.T) {
 
 	fresh := result(t, dom, now, 1)
 	v := peer.DecideIdentity(p, fresh, mailkey.Fingerprint{}, false, true)
-	if !v.Encrypt {
+	if !v.Encrypt || !v.AcceptFetched {
 		t.Fatalf("the current manifest must be accepted: %s", v.Reason)
 	}
 	p.Identity = peer.ApplyIdentity(p.Identity, v, fresh, now)
@@ -271,7 +271,7 @@ func TestReplayProtection(t *testing.T) {
 	old.FetchedAt = now
 	old.ExpiresAt = now.Add(24 * time.Hour)
 	v = peer.DecideIdentity(p, old, mailkey.Fingerprint{}, false, true)
-	if v.Encrypt || !v.Rollback || v.Reason != "replay/rollback" {
+	if !v.Encrypt || v.AcceptFetched || !v.Rollback || v.Reason != "replay/rollback" {
 		t.Fatalf("a replayed older manifest was accepted: %+v", v)
 	}
 	// The refusal must not move the watermark backwards.
@@ -281,19 +281,20 @@ func TestReplayProtection(t *testing.T) {
 	}
 
 	// The SAME issued_at under a different manifest id: two authorizations for
-	// one instant. MKDP1 reports rather than tie-breaks.
+	// one instant. There is no ordering between them, so report the ambiguity,
+	// refuse the response, and keep using the accepted cache.
 	twin := result(t, dom, now, 1)
 	twin.ManifestID = mailkey.ManifestID{9, 9, 9}
-	// Reported, not refused: §6.4 calls this an alert. Refusing would make an
-	// authority whose clock granularity produced two manifests in one second
-	// undeliverable, and MKDP1's answer to ambiguity is to surface it for a
-	// human rather than to invent a tie-break or to punish.
 	v = peer.DecideIdentity(p, twin, mailkey.Fingerprint{}, false, true)
 	if v.Reason != "replay/same-issued-different-id" || v.Alert == "" {
 		t.Fatalf("an unstable authority was not reported: %+v", v)
 	}
-	if !v.Encrypt {
-		t.Fatal("instability is an alert, not a refusal — this would strand mail on a publisher bug")
+	if !v.Encrypt || v.AcceptFetched {
+		t.Fatalf("ambiguous response was accepted instead of using the cache: %+v", v)
+	}
+	withoutCache := peer.DecideIdentity(p, twin, mailkey.Fingerprint{}, false, false)
+	if withoutCache.Encrypt || withoutCache.AcceptFetched {
+		t.Fatalf("an ambiguous response with no trusted cache must hold: %+v", withoutCache)
 	}
 
 	// An already-expired manifest can never authorize new encryption, whoever
@@ -309,8 +310,34 @@ func TestReplayProtection(t *testing.T) {
 	// domain at the first thing it saw.
 	newer := result(t, dom, now.Add(time.Hour), 1)
 	v = peer.DecideIdentity(p, newer, mailkey.Fingerprint{}, false, true)
-	if !v.Encrypt {
+	if !v.Encrypt || !v.AcceptFetched {
 		t.Fatalf("a newer manifest was refused: %+v", v)
+	}
+}
+
+// TestIdentityAuthorizationPrecedesReplay pins the C-02 ordering rule. A copied
+// issued_at is public information and cannot turn a missing or different signer
+// into the pinned identity; those responses must be rejected by the identity
+// matrix before replay ordering is even considered.
+func TestIdentityAuthorizationPrecedesReplay(t *testing.T) {
+	const dom = "example.com"
+	now := time.Unix(1750000000, 0).UTC()
+	p := pinnedPeer(t, dom, 1)
+	p.Identity.LastVerifiedIssuedAt = now
+	p.Identity.LastVerifiedManifestID = mailkey.ManifestID{7, 7, 7}
+
+	wrongSigner := result(t, dom, now, 9)
+	wrongSigner.ManifestID = mailkey.ManifestID{8, 8, 8}
+	v := peer.DecideIdentity(p, wrongSigner, mailkey.Fingerprint{}, false, true)
+	if v.Reason != "pinned/valid-proof-other-signer" || v.AcceptFetched {
+		t.Fatalf("a copied issue time bypassed the established pin: %+v", v)
+	}
+
+	missingProof := result(t, dom, now, 0)
+	missingProof.ManifestID = mailkey.ManifestID{9, 9, 9}
+	v = peer.DecideIdentity(p, missingProof, mailkey.Fingerprint{}, false, true)
+	if v.Reason != "pinned/proof-absent-or-invalid" || v.AcceptFetched {
+		t.Fatalf("a copied issue time bypassed proof enforcement: %+v", v)
 	}
 }
 

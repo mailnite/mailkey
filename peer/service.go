@@ -737,7 +737,11 @@ func (s *Service) followRotation(ctx context.Context, d string, prev *mailkey.Pe
 	st.PinnedPublicKey = append([]byte(nil), walk.PublicKey...)
 	st.PinnedAt = s.now()
 	st.Contested = ""
-	if !res.Manifest.IssuedAt.IsZero() && res.Manifest.IssuedAt.After(st.LastVerifiedIssuedAt) {
+	// Replay ordering is scoped to the identity that authorized the manifest.
+	// A verified rotation starts a new ordering history; retaining the former
+	// identity's watermark could reject a perfectly valid successor whose clock
+	// is equal to or behind the predecessor's last publication.
+	if !res.Manifest.IssuedAt.IsZero() {
 		st.LastVerifiedIssuedAt = res.Manifest.IssuedAt
 		st.LastVerifiedManifestID = res.ManifestID
 	}

@@ -393,9 +393,9 @@ func TestRotation(t *testing.T) {
 	_ = st
 }
 
-// TestAuthorityInstability: A → B → A inside the window is reported, not
-// resolved. Inventing a winner here would reintroduce the ordering rule MKDP1
-// exists to remove.
+// TestAuthorityInstability: two different authorizations for the same issue
+// time are reported, but the second one never becomes effective or historical.
+// Inventing a winner here would reintroduce the ordering rule MKDP1 removed.
 func TestAuthorityInstability(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
 	svc, r, _ := newSvc(t, &clock)
@@ -407,22 +407,27 @@ func TestAuthorityInstability(t *testing.T) {
 	if _, err := svc.Refresh(ctx, domain); err != nil {
 		t.Fatal(err)
 	}
-	clock = clock.Add(time.Minute)
 	r.set(b, nil)
-	if _, err := svc.Refresh(ctx, domain); err != nil {
-		t.Fatal(err)
-	}
-	clock = clock.Add(time.Minute)
-	r.set(a, nil)
 	p, err := svc.Refresh(ctx, domain)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if !p.AuthorityUnstable {
-		t.Fatal("an authority alternating between manifests must be flagged unstable")
+		t.Fatalf("the accepted cache should remain usable: %v", err)
 	}
 	if p.Effective.ManifestID != a.ManifestID {
-		t.Fatal("the latest successful fetch is still what is effective")
+		t.Fatal("an ambiguous same-time manifest replaced the effective one")
+	}
+	for _, h := range p.History {
+		if h.ManifestID == b.ManifestID {
+			t.Fatal("an ambiguous same-time manifest entered history")
+		}
+	}
+	found := false
+	for _, issue := range p.Issues {
+		if issue.Code == mailkey.IssueReplay {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("same-time authority instability was not recorded")
 	}
 }
 

@@ -85,15 +85,6 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 	proofValid := res.Proof != nil && res.ProofError == ""
 	proofBroken := res.ProofError != ""
 
-	// --- replay (§6.4) ------------------------------------------------------
-	// Checked before the trust matrix because it applies to manifests that are
-	// otherwise perfectly authorized: a signature proves who authorized these
-	// bytes, never that they are the CURRENT authorization. An attacker able to
-	// serve responses could replay yesterday's forever.
-	if v, replayed := checkReplay(cur, res); replayed {
-		return v
-	}
-
 	pinned := cur.Status == mailkey.IdentityPinned
 	switch {
 	// --- pinned rows --------------------------------------------------------
@@ -108,7 +99,7 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 			out.Alert = "DNS advertises a different identity fingerprint than the pinned one; the pin stands and delivery is unaffected"
 			out.Reason = "pinned/dns-disagrees"
 		}
-		return out
+		return afterIdentityAuthorization(cur, res, cachedUsable, out)
 
 	case pinned && proofValid:
 		// Correctly signed, by someone else. This is either an identity
@@ -144,26 +135,27 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// Present and wrong on an unpinned domain: encrypt as before, do not
 		// pin, and alert. Pinning here would let a broken or hostile authority
 		// choose the anchor.
-		return Verdict{
+		return afterIdentityAuthorization(cur, res, cachedUsable, Verdict{
 			Encrypt: true, AcceptFetched: true, Status: cur.Status,
 			Alert:  "this domain served a malformed identity proof (" + res.ProofError + "); encrypting without establishing a pin",
 			Reason: "unpinned/invalid-proof",
-		}
+		})
 
 	case !proofValid && hasDNSFP:
 		// DNS says the domain has an identity; the response carried none. Either
 		// an intermediary stripped it or the deployment is inconsistent. Both
 		// are worth saying; neither changes what we send.
-		return Verdict{
+		return afterIdentityAuthorization(cur, res, cachedUsable, Verdict{
 			Encrypt: true, AcceptFetched: true, Status: cur.Status,
 			Alert:  "DNS advertises an identity fingerprint for this domain but the authority served no proof — the proof may have been stripped in transit, or the deployment is inconsistent",
 			Reason: "unpinned/dns-fp-but-no-proof",
-		}
+		})
 
 	case !proofValid:
 		// An unsigned domain. Legacy MKDP1, and the majority case during
 		// adoption. Nothing to pin, nothing to alert about.
-		return Verdict{Encrypt: true, AcceptFetched: true, Status: cur.Status, Reason: "unpinned/no-proof"}
+		return afterIdentityAuthorization(cur, res, cachedUsable,
+			Verdict{Encrypt: true, AcceptFetched: true, Status: cur.Status, Reason: "unpinned/no-proof"})
 
 	case hasDNSFP && dnsFP != res.Proof.Fingerprint:
 		// A valid proof the DNS channel disagrees with. Encrypt — the manifest
@@ -171,13 +163,13 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		// holding only the TLS path would otherwise make a false anchor
 		// permanent. Requiring them to also control the observed DNS channel is
 		// the entire value of unauthenticated corroboration.
-		return Verdict{
+		return afterIdentityAuthorization(cur, res, cachedUsable, Verdict{
 			Encrypt: true, AcceptFetched: true, Status: mailkey.IdentityContested,
 			Contest: fmt.Sprintf("HTTPS signs with %s, DNS advertises %s", short(res.Proof.Fingerprint), short(dnsFP)),
 			Alert: "Message encrypted using a WebPKI-authenticated but unpinned identity. " +
 				"DNS advertised a different identity. Persistent pinning was withheld.",
 			Reason: "unpinned/dns-disagrees",
-		}
+		})
 
 	default:
 		// A valid proof, and either DNS corroborates it or DNS says nothing.
@@ -189,8 +181,22 @@ func DecideIdentity(p *mailkey.Peer, res mailkey.Result, dnsFP mailkey.Fingerpri
 		if hasDNSFP {
 			out.Reason = "unpinned/pin-established-dns-corroborated"
 		}
-		return out
+		return afterIdentityAuthorization(cur, res, cachedUsable, out)
 	}
+}
+
+// afterIdentityAuthorization applies replay ordering only after the identity
+// matrix has authorized the fetched response. Ordering cannot authenticate a
+// signer: checking it first would let a different or missing signer bypass an
+// established pin merely by copying an accepted issued_at value.
+func afterIdentityAuthorization(cur mailkey.IdentityState, res mailkey.Result, cachedUsable bool, accepted Verdict) Verdict {
+	if !accepted.AcceptFetched {
+		return accepted
+	}
+	if replay, found := checkReplay(cur, res, cachedUsable); found {
+		return replay
+	}
+	return accepted
 }
 
 /*
@@ -203,17 +209,17 @@ ALREADY verified rather than against anything in the response:
   - an older issued_at is a rollback and must not replace the newer effective
     manifest;
   - the same issued_at under a different manifest_id means the authority produced
-    two different authorizations for one instant, which MKDP1 reports rather than
-    tie-breaks.
+    two different authorizations for one instant, which MKDP1 reports and refuses
+    rather than tie-breaking by arrival order.
 
 Note what is deliberately absent: any unsigned ordering value carried on the
 wire. That is the `seq` defect MKDP1 was created to remove, and adding it back as
 a header would reintroduce it exactly.
 */
-func checkReplay(cur mailkey.IdentityState, res mailkey.Result) (Verdict, bool) {
+func checkReplay(cur mailkey.IdentityState, res mailkey.Result, cachedUsable bool) (Verdict, bool) {
 	if !res.ExpiresAt.IsZero() && !res.ExpiresAt.After(res.FetchedAt) {
 		return Verdict{
-			Encrypt: false, Status: cur.Status,
+			Encrypt: cachedUsable, Status: cur.Status,
 			Alert:  "the authority served an already-expired manifest; it cannot authorize new encryption",
 			Reason: "replay/expired",
 		}, true
@@ -225,7 +231,7 @@ func checkReplay(cur mailkey.IdentityState, res mailkey.Result) (Verdict, bool) 
 	switch {
 	case issued.Before(cur.LastVerifiedIssuedAt):
 		return Verdict{
-			Encrypt: false, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
+			Encrypt: cachedUsable, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
 			Status:   cur.Status,
 			Rollback: true,
 			Alert: fmt.Sprintf("the authority served a manifest issued %s, older than the %s already verified — a replay of an earlier authorization",
@@ -233,16 +239,14 @@ func checkReplay(cur mailkey.IdentityState, res mailkey.Result) (Verdict, bool) 
 			Reason: "replay/rollback",
 		}, true
 	case issued.Equal(cur.LastVerifiedIssuedAt) && res.ManifestID != cur.LastVerifiedManifestID:
-		// An ALERT, not a refusal — §6.4 is deliberate about the difference.
-		// Two manifests stamped the same second is what a publisher building
-		// twice on a cold cache produces, and refusing would make an authority
-		// with a clock-granularity bug undeliverable rather than noisy. MKDP1
-		// reports instability for a human; it does not tie-break, and it does
-		// not punish.
+		// There is no authenticated ordering between two different manifests
+		// stamped at the same instant. Report the instability and keep using the
+		// previously accepted cache; when none remains usable, hold rather than
+		// letting an ambiguous response replace known state.
 		return Verdict{
-			Encrypt: true, AcceptFetched: true, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
+			Encrypt: cachedUsable, Pin: cur.Fingerprint, HasPin: cur.Status == mailkey.IdentityPinned,
 			Status: cur.Status,
-			Alert:  "the authority served two different manifests carrying the same issue time — the authority is unstable",
+			Alert:  "the authority served two different manifests carrying the same issue time — refusing the ambiguous response and keeping the previously accepted manifest",
 			Reason: "replay/same-issued-different-id",
 		}, true
 	}

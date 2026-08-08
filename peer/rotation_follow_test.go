@@ -130,7 +130,15 @@ func TestASignedRotationIsFollowedWithoutAHuman(t *testing.T) {
 		chainHit: &hits,
 	}
 	store := pinnedStore(t, dom, fp1, []byte(pk1), now)
-	_ = store
+	oldState, err := store.GetPeer(ctx, dom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldState.Identity.LastVerifiedIssuedAt = now.Add(time.Hour)
+	oldState.Identity.LastVerifiedManifestID = mailkey.ManifestID{7, 7, 7}
+	if err := store.SetIdentity(ctx, dom, oldState.Identity); err != nil {
+		t.Fatal(err)
+	}
 	svc := peer.NewService(r, store, peer.Options{Now: func() time.Time { return now }})
 	t.Cleanup(svc.Close)
 
@@ -150,6 +158,10 @@ func TestASignedRotationIsFollowedWithoutAHuman(t *testing.T) {
 	}
 	if len(p.Identity.PinnedPublicKey) == 0 {
 		t.Fatal("the new pin lost its public key — the NEXT rotation would be unfollowable")
+	}
+	if !p.Identity.LastVerifiedIssuedAt.Equal(r.res.Manifest.IssuedAt) ||
+		p.Identity.LastVerifiedManifestID != r.res.ManifestID {
+		t.Fatalf("the successor identity inherited the predecessor's replay watermark: %+v", p.Identity)
 	}
 	if hits != 1 {
 		t.Fatalf("the chain was fetched %d times; it is consulted only when the signer changes", hits)

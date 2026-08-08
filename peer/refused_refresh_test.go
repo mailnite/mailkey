@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mailnite/mailkey"
+	"github.com/mailnite/mailkey/identity"
 	"github.com/mailnite/mailkey/peer"
 )
 
@@ -100,5 +101,71 @@ func TestRefusedRefreshUsesTheTrustedCache(t *testing.T) {
 				t.Fatalf("next send selected %x, want trusted %x", res.ManifestID, trusted.ManifestID)
 			}
 		})
+	}
+}
+
+// TestSameIssuedConflictNeverReplacesCache exercises C-02 through the complete
+// service/store path. The conflicting manifest is validly signed by the pin, so
+// identity authentication succeeds; its ambiguous ordering must still keep it
+// out of effective and historical state.
+func TestSameIssuedConflictNeverReplacesCache(t *testing.T) {
+	const dom = "example.com"
+	now := time.Unix(1_750_000_000, 0).UTC()
+	trusted := realResult(t, dom, now, 1)
+	conflict := realResult(t, dom, now, 9) // different receiver key, same issue time
+	fp, pk, priv := fpFor(t, dom, 1)
+	sig, err := identity.SignManifest(priv, dom, conflict.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict.Proof = &mailkey.Proof{PublicKey: pk, Fingerprint: fp, Signature: sig}
+	if conflict.ManifestID == trusted.ManifestID {
+		t.Fatal("test fixture did not produce distinct manifests")
+	}
+
+	ctx := context.Background()
+	store := peer.NewMemStore(func() time.Time { return now })
+	if err := store.InstallManifest(ctx, dom, trusted); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetIdentity(ctx, dom, mailkey.IdentityState{
+		Status:                 mailkey.IdentityPinned,
+		Fingerprint:            fp,
+		PinnedPublicKey:        append([]byte(nil), pk...),
+		EverHTTPSValidated:     true,
+		LastVerifiedIssuedAt:   trusted.Manifest.IssuedAt,
+		LastVerifiedManifestID: trusted.ManifestID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := peer.NewService(&fixedResolver{res: conflict}, store, peer.Options{
+		Now: func() time.Time { return now },
+	})
+	t.Cleanup(svc.Close)
+
+	got, err := svc.Refresh(ctx, dom)
+	if err != nil {
+		t.Fatalf("the trusted cache should remain usable: %v", err)
+	}
+	if got.Effective == nil || got.Effective.ManifestID != trusted.ManifestID {
+		t.Fatalf("same-issued conflict replaced the trusted cache: %+v", got.Effective)
+	}
+	if got.Identity.LastVerifiedManifestID != trusted.ManifestID {
+		t.Fatalf("same-issued conflict replaced the replay watermark: %+v", got.Identity)
+	}
+	for _, h := range got.History {
+		if h.ManifestID == conflict.ManifestID {
+			t.Fatal("same-issued conflict was installed into history")
+		}
+	}
+	foundReplay := false
+	for _, issue := range got.Issues {
+		if issue.Code == mailkey.IssueReplay {
+			foundReplay = true
+		}
+	}
+	if !foundReplay {
+		t.Fatalf("same-issued conflict raised no replay issue: %+v", got.Issues)
 	}
 }
