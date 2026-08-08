@@ -338,6 +338,12 @@ type Observation struct {
 	Source     Source
 	ManifestID ManifestID
 	HasID      bool
+	// Fingerprint is the identity fingerprint carried by a DNS sighting. HasFP
+	// means every usable fingerprint-bearing record in that DNS answer agreed
+	// on this value. It remains an observation: storing it must never install or
+	// replace the identity pin.
+	Fingerprint Fingerprint
+	HasFP       bool
 	// Authority is the delegated authority domain this sighting advertised
 	// (a= — "" means self-hosted). It is retained for diagnostics and for use
 	// after an identity pin exists; it never authorizes first-contact routing.
@@ -447,6 +453,9 @@ type IdentityState struct {
 	// corroborate a pin or contest one; it can never install or replace one.
 	DNSFingerprint Fingerprint
 	HasDNSFP       bool
+	// DNSObservedAt records when DNSFingerprint was observed. The source is
+	// deliberately implicit in the field: no other channel may populate it.
+	DNSObservedAt time.Time
 	// LastVerifiedIssuedAt and LastVerifiedManifestID are the replay defense
 	// (§6.4): a signature proves authorization, not freshness, so an attacker
 	// who can serve responses could otherwise return yesterday's still-valid

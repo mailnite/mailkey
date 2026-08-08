@@ -145,6 +145,20 @@ func Observe(p *mailkey.Peer, o mailkey.Observation, now time.Time) {
 		o.ObservedAt = now
 	}
 	o.Status = classify(p, o)
+	// Persist DNS identity corroboration in the SAME store mutation as the
+	// observation. Service.ObserveDNS writes this mutation before it schedules
+	// resolution, so a first-contact fetch cannot race ahead and pin a signer
+	// without seeing the DNS opinion that triggered it.
+	//
+	// A missing or conflicting fp is represented by HasFP=false and therefore
+	// cannot erase a previously observed value. DNS is unauthenticated; absence
+	// is not authority to weaken already-recorded corroboration. Likewise, an
+	// older delayed observation cannot roll the current DNS view backwards.
+	if o.Source == mailkey.SourceDNS && o.HasFP &&
+		(p.Identity.DNSObservedAt.IsZero() || !o.ObservedAt.Before(p.Identity.DNSObservedAt)) {
+		p.Identity = ObserveDNSFingerprint(p.Identity, o.Fingerprint, true)
+		p.Identity.DNSObservedAt = o.ObservedAt
+	}
 	replaced := false
 	for i := range p.Observations {
 		if p.Observations[i].Source == o.Source {

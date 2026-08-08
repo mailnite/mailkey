@@ -173,9 +173,10 @@ func DiscoveryURL(domain, authority string) (*url.URL, error) {
 // Malformed records are skipped (with the reason returned for diagnostics)
 // rather than failing the set: one broken record must not hide a good one.
 //
-// Several DIFFERENT valid ids mean the DNS view is inconsistent — the caller
-// records that and resolves over HTTPS. It does not pick a winner; there is no
-// rule by which one unauthenticated record beats another.
+// Several DIFFERENT valid ids or identity fingerprints mean the DNS view is
+// inconsistent — the caller records that and resolves over HTTPS. It does not
+// pick a winner; there is no rule by which one unauthenticated record beats
+// another.
 func ParseDNS(domain string, txt []string) (ads []mailkey.Advertisement, skipped []error, err error) {
 	d, err := Normalize(domain)
 	if err != nil {

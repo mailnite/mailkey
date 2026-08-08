@@ -207,13 +207,24 @@ func (s *Service) ObserveDNS(ctx context.Context, domain string, txt []string) e
 	if a, consistent := singleAuthority(ads); consistent {
 		o.Authority = a
 	}
-	if id, consistent := singleID(ads); consistent {
-		o.ManifestID, o.HasID = id, true
-	} else {
+	var inconsistencies []string
+	if id, has, consistent := singleID(ads); !consistent {
 		// Several different valid ids. Recorded as inconsistent and resolved
 		// over HTTPS — never arbitrated between.
+		inconsistencies = append(inconsistencies, "several different manifest ids advertised")
+	} else if has {
+		o.ManifestID, o.HasID = id, true
+	}
+	if fp, has, consistent := singleFingerprint(ads); !consistent {
+		// Conflicting fingerprints are not an identity opinion. In particular,
+		// they must not overwrite an earlier agreed observation in the store.
+		inconsistencies = append(inconsistencies, "several different identity fingerprints advertised")
+	} else if has {
+		o.Fingerprint, o.HasFP = fp, true
+	}
+	if len(inconsistencies) > 0 {
 		o.Status = mailkey.ObservationInconsistent
-		o.Context = "several different manifest ids advertised"
+		o.Context = strings.Join(inconsistencies, "; ")
 	}
 	return s.observe(ctx, d, o)
 }
@@ -252,7 +263,7 @@ arrived too often would turn a rate limit into a denial of service of its own.
 */
 func (s *Service) observe(ctx context.Context, domain string, o mailkey.Observation) error {
 	now := s.now()
-	if !s.adm.allowObservation(domain, o.Source, o.ManifestID, o.HasID, now) {
+	if !s.adm.allowObservation(domain, o, now) {
 		return nil // the same evidence, again, within the interval
 	}
 	p, err := s.store.GetPeer(ctx, domain)
@@ -287,9 +298,11 @@ func (s *Service) scheduleIfBehind(ctx context.Context, domain string) error {
 	return nil
 }
 
-// singleID reports the common manifest id of a set of advertisements, and
-// whether they agree. Advertisements without an id do not create disagreement;
-// two DIFFERENT ids do.
+// singleID reports the common manifest id of a set of advertisements, whether
+// any record carried one, and whether all ids that were present agree.
+// Advertisements without an id do not create disagreement; two DIFFERENT ids
+// do. The separate has result matters now that fp-only DNS records are the
+// normal format rather than malformed id-less records.
 // singleAuthority is singleID's twin for the a= field: one agreed delegated
 // authority across every record, or (false) disagreement. An empty result with
 // ok=true is the ordinary self-hosted case.
@@ -336,7 +349,7 @@ func (s *Service) authorityHint(ctx context.Context, domain string) string {
 	return hint
 }
 
-func singleID(ads []mailkey.Advertisement) (mailkey.ManifestID, bool) {
+func singleID(ads []mailkey.Advertisement) (mailkey.ManifestID, bool, bool) {
 	var id mailkey.ManifestID
 	seen := false
 	for _, ad := range ads {
@@ -348,10 +361,30 @@ func singleID(ads []mailkey.Advertisement) (mailkey.ManifestID, bool) {
 			continue
 		}
 		if ad.ManifestID != id {
-			return mailkey.ManifestID{}, false
+			return mailkey.ManifestID{}, false, false
 		}
 	}
-	return id, seen
+	return id, seen, true
+}
+
+// singleFingerprint is singleID's identity twin. Only one agreed fp is safe to
+// persist as DNS corroboration; disagreement is recorded but never arbitrated.
+func singleFingerprint(ads []mailkey.Advertisement) (mailkey.Fingerprint, bool, bool) {
+	var fp mailkey.Fingerprint
+	seen := false
+	for _, ad := range ads {
+		if !ad.HasFP {
+			continue
+		}
+		if !seen {
+			fp, seen = ad.Fingerprint, true
+			continue
+		}
+		if ad.Fingerprint != fp {
+			return mailkey.Fingerprint{}, false, false
+		}
+	}
+	return fp, seen, true
 }
 
 // AddPeer resolves a domain on an administrator's request. It is the same

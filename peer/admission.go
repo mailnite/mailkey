@@ -84,10 +84,14 @@ type admission struct {
 // decision is what we last did about a domain, and when.
 type decision struct {
 	at time.Time
-	// id is the manifest id that was observed, so a DIFFERENT id is treated as
-	// news rather than as a repeat.
+	// A different manifest id OR DNS identity fingerprint is news rather than
+	// a repeat. fp is essential here: identity lasts much longer than a
+	// manifest, so a rollover commonly changes fp while an old id remains in a
+	// cached DNS answer.
 	id     mailkey.ManifestID
 	hasID  bool
+	fp     mailkey.Fingerprint
+	hasFP  bool
 	source mailkey.Source
 }
 
@@ -115,21 +119,27 @@ func newAdmission(interval time.Duration, burst int, refillEach time.Duration, n
 allowObservation reports whether an observation about domain should reach
 storage, and records the decision.
 
-The key is (domain, source, id): a header and a DNS record about the same domain
-are different evidence, and a changed id is different evidence again. Anything
-else within the interval is the same hint arriving twice.
+The key is (domain, source, id, fp): a header and a DNS record about the same
+domain are different evidence, and a changed id or identity fingerprint is
+different evidence again. Anything else within the interval is the same hint
+arriving twice.
 */
-func (a *admission) allowObservation(domain string, source mailkey.Source, id mailkey.ManifestID, hasID bool, now time.Time) bool {
+func (a *admission) allowObservation(domain string, o mailkey.Observation, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if d, ok := a.seen[domain]; ok && d.source == source && d.hasID == hasID && d.id == id {
+	if d, ok := a.seen[domain]; ok &&
+		d.source == o.Source && d.hasID == o.HasID && d.id == o.ManifestID &&
+		d.hasFP == o.HasFP && d.fp == o.Fingerprint {
 		if now.Sub(d.at) < a.interval {
 			return false
 		}
 	}
 	a.sweepLocked(now)
-	a.seen[domain] = decision{at: now, id: id, hasID: hasID, source: source}
+	a.seen[domain] = decision{
+		at: now, id: o.ManifestID, hasID: o.HasID,
+		fp: o.Fingerprint, hasFP: o.HasFP, source: o.Source,
+	}
 	return true
 }
 
