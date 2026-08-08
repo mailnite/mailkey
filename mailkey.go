@@ -240,9 +240,9 @@ type Advertisement struct {
 	// Authority is the DELEGATED authority domain from the a= field — the
 	// domain whose mail host serves this domain's manifests (x-primary-domain
 	// delegation). Empty means self-hosted: the authority is Domain itself.
-	// Like every observation field it can misroute one request and nothing
-	// more: validation binds the manifest to Domain and the serving host to
-	// the manifest's own SIGNED authority list, never to this hint.
+	// Like every observation field it is untrusted. It MUST NOT select the route
+	// on first contact; only an established identity pin (or a separate
+	// authenticated local policy) can make an observed delegation eligible.
 	Authority  string
 	ManifestID ManifestID
 	HasID      bool
@@ -285,9 +285,10 @@ type Result struct {
 // construction, TLS validation, redirect refusal, transfer limits, canonical
 // parsing and manifest validation — a caller cannot opt out of any of them.
 type Resolver interface {
-	// authority is the delegated authority DOMAIN observed for this subject
-	// ("" = self-hosted). It selects which mail host is dialed and takes part
-	// in no trust decision.
+	// authority is a delegated authority DOMAIN already authorized by the
+	// caller's trust state ("" = subject-domain bootstrap). Resolver validates
+	// the returned object, but cannot decide whether a routing hint was allowed
+	// to select this host; callers MUST NOT pass an untrusted first-contact a=.
 	Resolve(ctx context.Context, domain, authority string) (Result, error)
 }
 
@@ -338,9 +339,8 @@ type Observation struct {
 	ManifestID ManifestID
 	HasID      bool
 	// Authority is the delegated authority domain this sighting advertised
-	// (a= — "" means self-hosted). Stored so a later resolve knows which host
-	// to ask; like every observation field it routes a request and decides
-	// nothing.
+	// (a= — "" means self-hosted). It is retained for diagnostics and for use
+	// after an identity pin exists; it never authorizes first-contact routing.
 	Authority  string
 	ObservedAt time.Time
 	Status     ObservationStatus

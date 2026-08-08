@@ -176,26 +176,29 @@ GET https://mail.<a>/.well-known/mail-key-identity?d=<d>
 Content-Type: application/msgpack
 ```
 
-`a` is the domain's authority (MKDP1 §4): `d` itself when self-hosted, and the
-delegated authority otherwise. The subject rides as `?d=` here for exactly the
-reason it does on the manifest plane — one authority host serves many domains
-— and the same server rules apply: a named subject only, `404` for anything
-not hosted, no listing form, and a Host-derived subject when `d` is absent.
+`a` is an authority already eligible under MKDP1 §4: `d` during unpinned
+bootstrap, and an observed delegated authority only after a pin or separate
+authenticated policy authorizes that route. The subject rides as `?d=` here for
+exactly the reason it does on the manifest plane — one authority host serves
+many domains — and the same server rules apply.
 
 The body is a canonical object carrying the active identity key, its `fp`,
 status, an OPTIONAL `authority` sequence, and the ordered chain of rotation
-statements (§5). A client fetches it only to establish a pin, to follow a
-rotation, or to check revocation — never per manifest refresh.
+statements (§5). A client fetches it only after a pin exists, to follow a
+rotation or check revocation — never to bootstrap trust and never per manifest
+refresh.
 
-`authority` carries the same meaning, bounds (1..4 canonical domains) and
-absence rule as the manifest's (MKDP1 §6), and a client MUST enforce it
-exactly as MKDP1 §4.1 requires: the host the document was fetched from must be
-`mail.<x>` for some `x` it names, or `mail.<d>` when it names none.
+`authority` carries the same shape, bounds (1..4 canonical domains) and absence
+rule as the manifest's (MKDP1 §6), and a client MUST enforce it as a routing
+consistency check: the host the document was fetched from must be `mail.<x>`
+for some `x` it names, or `mail.<d>` when it names none. The head document has
+no document-level signature, so this field MUST NOT authorize delegation; only
+the pre-existing pin makes the route eligible, and only signed chain statements
+authorize identity transitions.
 
-This plane needs the check MORE than the manifest plane does, not less: it is
-where pins are established and rotations are followed, so an identity resource
-accepted from a host the domain never authorized would be the one delegation
-mistake with lasting consequences.
+The identity resource cannot establish its own right to be fetched. Treating
+its `authority` field as such a grant would recreate the circular first-contact
+trust problem on the identity plane.
 
 Old clients never request this resource, so it MAY use a new strict canonical
 schema without any compatibility constraint from MKDP1.

@@ -309,12 +309,21 @@ func singleAuthority(ads []mailkey.Advertisement) (string, bool) {
 }
 
 // authorityHint reads the delegated authority the freshest observations agreed
-// on. It is a ROUTING lookup, deliberately best-effort: a store error or an
-// absent record yields "", which resolves against the derived host — the
-// pre-delegation behavior.
+// on, but only after the subject has an established identity pin.
+//
+// Before that pin exists, an observation-supplied a= is circular evidence: an
+// arbitrary inbound header (or an unauthenticated DNS answer) could route the
+// first fetch to an attacker, whose response could name that same attacker as
+// authority and introduce the identity that supposedly authorizes it. First
+// contact therefore always uses the subject-domain WebPKI endpoint. Operators
+// may implement that endpoint directly, as a CNAME, or as a reverse proxy.
+//
+// Once pinned, a delegated route cannot install an attacker identity or key:
+// the fetched manifest must still be authorized by the existing pin. A store
+// error or absent record likewise yields "" and uses the subject endpoint.
 func (s *Service) authorityHint(ctx context.Context, domain string) string {
 	p, err := s.store.GetPeer(ctx, domain)
-	if err != nil || p == nil {
+	if err != nil || p == nil || p.Identity.Status != mailkey.IdentityPinned {
 		return ""
 	}
 	newest := time.Time{}

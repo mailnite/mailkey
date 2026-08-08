@@ -558,14 +558,13 @@ func delegatedManifest(t *testing.T, d string, authorities []string, now time.Ti
 TestDelegatedResolveAndConsent is the delegation revision's security core.
 
 A domain hosted elsewhere is fetched from its AUTHORITY's host, with the
-subject named in ?d= — and what comes back is accepted only because the
-manifest ITSELF names that host in its signed authority list. Four cases:
+subject named in ?d=. This resolver-level test assumes the caller has already
+made that route eligible; what comes back is accepted only when the manifest
+names that host in its authority list. Four cases:
 
  1. delegated + consenting → accepted, and the request carried ?d=<subject>;
- 2. delegated + NOT consenting (the manifest names someone else) → refused:
-    this is what makes a hostile a= worthless — it can misroute a request,
-    never move a trust decision, and a manifest stolen from one authority
-    cannot be re-served from another;
+ 2. delegated + NOT consenting (the manifest names someone else) → refused,
+    so a manifest from one eligible authority cannot be re-served by another;
  3. a self-hosted manifest (no authority field) fetched from a delegated
     host → refused, the pre-delegation rule unchanged;
  4. the dual-entry form ([new, old]) is accepted from EITHER host, which is

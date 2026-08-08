@@ -48,10 +48,12 @@ Rules:
   port, a scheme, a path or a URL. A record whose `a` does not normalize is
   malformed and MUST be ignored, not degraded to self-hosted.
 - `a` naming the record's own domain is equivalent to omitting it.
-- `a` is an OBSERVATION like every other field: it selects which host a client
-  dials and MUST NOT take part in any trust decision. A client MUST still bind
-  the manifest to the subject domain (§6) and MUST enforce the manifest's own
-  signed authority (§4).
+- `a` is an OBSERVATION like every other field. Before an identity pin exists,
+  an ordinary DNS answer MUST NOT let it select the HTTPS host: the first fetch
+  uses `mail.<d>`. A DNSSEC-validated delegation or explicit administrator
+  policy MAY authorize it through a separately defined local interface. After
+  a pin exists, `a` may select a route because the response still has to verify
+  under that pin.
 - `v` MUST equal `MKDP1`.
 - `mode` MUST equal `https`.
 - `id` MUST decode as exactly 32 bytes using unpadded base64url.
@@ -72,9 +74,9 @@ Mail-Key: v=MKDP1; d=customer.example; id=<...>; a=provider.example; mode=https
 Rules:
 
 - `a` is OPTIONAL and carries exactly the meaning, bounds and prohibitions it
-  has in §2. A delegated domain SHOULD emit it: header-only discovery is
-  valid MKDP1 (DNS is not required), and without it a receiver would derive
-  `mail.<d>`, which a delegated domain does not serve.
+  has in §2. A delegated domain SHOULD emit it for diagnostics and post-pin
+  refreshes. Because the header is attacker-controlled until an aligned DKIM
+  verifier says otherwise, it MUST NOT select the authority on first contact.
 
 - `v`, `d`, `id` and `mode` are all REQUIRED; a field missing any of them is
   malformed and MUST be ignored.
@@ -90,8 +92,9 @@ Rules:
 
 ## 4. HTTPS endpoint
 
-Write `a` for the authority domain of `d` (the `a=` observation, or `d` itself
-when there is none). The only MKDP1 URL for `d` is:
+Write `a` for an authority domain already authorized for `d`. With no
+established pin or separately authenticated delegation, `a` MUST be `d`
+regardless of an observed `a=`. The only MKDP1 URL for `d` is:
 
 ```text
 https://mail.<a>/.well-known/mail-key?d=<d>
@@ -119,6 +122,8 @@ The server:
 
 The client MUST:
 
+- bootstrap an unpinned subject through `mail.<d>`; a delegated deployment can
+  provide that endpoint directly, through a CNAME, or through a reverse proxy;
 - use HTTPS;
 - perform normal WebPKI chain and hostname validation;
 - require the certificate identity for `mail.<a>` — the AUTHORITY's host, which
@@ -158,10 +163,12 @@ fetched from equals `mail.<x>` for some `x` in that sequence — or, when the
 field is absent, `mail.<domain>`. A manifest failing this check MUST be
 rejected.
 
-This is what makes `a=` safe. The record is unauthenticated, so a hostile one
-can point a client at any MKDP1 host; consent means the worst outcome is a
-`404` or a rejected response, never an installed key. It equally prevents a
-manifest obtained from one authority being re-served from another.
+For a pinned domain, the detached identity signature authenticates this field
+and makes `a=` safe to use as a route. On first contact it is only the
+subject-domain WebPKI bootstrap that authorizes the response; allowing an
+observed `a=` to choose both the server and the newly introduced signer would
+be circular trust. The check also prevents a manifest obtained from one
+authorized authority being re-served from another.
 
 The identity resource (§4.2 of the domain-identity specification) carries the
 same field and MUST be checked the same way.
@@ -350,4 +357,3 @@ Clients MUST accept only `MKDP1` objects they understand. A future incompatible
 schema, trust model, or encryption construction uses another version or a new
 registered suite identifier. Implementations MUST NOT guess how to process an
 unknown version.
-

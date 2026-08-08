@@ -196,9 +196,10 @@ func ParseDNS(domain string, txt []string) (ads []mailkey.Advertisement, skipped
 	return ads, skipped, nil
 }
 
-// ParseHeader reads a Mail-Key header value. The header names its own domain
-// (d=), which is normalized here; the authority host is then derived from it,
-// never taken from the header.
+// ParseHeader reads a Mail-Key header value. The header names its own subject
+// domain (d=); d= and the optional delegated authority domain a= are normalized
+// here. The parser never accepts an arbitrary host or URL, and the caller must
+// not use a= to route first contact without separate authentication.
 func ParseHeader(headerValue string) (mailkey.Advertisement, error) {
 	if len(headerValue) > MaxHeaderLen {
 		return mailkey.Advertisement{}, xerrors.Errorf("header: longer than %d bytes", MaxHeaderLen)
@@ -207,10 +208,9 @@ func ParseHeader(headerValue string) (mailkey.Advertisement, error) {
 }
 
 // FormatHeader renders the header a server stamps on its own outbound mail.
-// authority is the delegated authority domain ("" = self-hosted) — the header
-// form must carry it too, because header-only discovery works with DNS
-// optional, and a delegated domain's header would otherwise send resolvers to
-// a mail.<d> that serves no TLS.
+// authority is the delegated authority domain ("" = self-hosted). The header
+// carries it for diagnostics and post-pin refreshes; because a header is
+// attacker-controlled at first contact, it cannot authorize its own route.
 func FormatHeader(domain string, id mailkey.ManifestID, authority string) (string, error) {
 	d, err := Normalize(domain)
 	if err != nil {

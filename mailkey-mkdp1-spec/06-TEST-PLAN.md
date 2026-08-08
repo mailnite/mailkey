@@ -86,6 +86,18 @@ Reject:
 - `kid` mismatch;
 - noncanonical MessagePack.
 
+### Delegated bootstrap
+
+Verify:
+
+- an unpinned header or ordinary DNS observation carrying `a=attacker.example`
+  still resolves through `mail.<subject>`;
+- a response reachable only through that attacker-selected route cannot
+  establish an identity pin or install a manifest;
+- the rejected routing claim remains visible as an observation;
+- after an identity pin exists, an observed delegated route is eligible, but
+  only responses authorized by the established pin can be installed.
+
 ## 5. Observation reconciliation tests
 
 ### Matching observations

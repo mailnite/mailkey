@@ -181,11 +181,10 @@ func New(opts Options) *Resolver {
 // performs it and the rest wait for its outcome. That keeps an observation
 // burst — a mail flood, a DNS record change seen by many workers — down to a
 // single connection to the authority.
-// authority is the DELEGATED authority domain from the caller's freshest
-// advertisement ("" = self-hosted). It is a routing observation: it decides
-// which mail host is dialed and nothing else — the manifest must still bind
-// the SUBJECT domain, and (once the signed authority lands) the serving host
-// must appear in the manifest's own authority list.
+// authority is a DELEGATED authority domain the caller has already made
+// eligible ("" = subject-domain bootstrap). Resolver validates the returned
+// bytes but has no peer trust state, so it cannot safely authorize an untrusted
+// first-contact a= on the caller's behalf.
 func (r *Resolver) Resolve(ctx context.Context, domain, authority string) (mailkey.Result, error) {
 	d, err := discovery.Normalize(domain)
 	if err != nil {
@@ -323,16 +322,14 @@ func (r *Resolver) fetch(ctx context.Context, d, authority string) (mailkey.Resu
 	}
 	/*
 		The consent check: the host we ACTUALLY fetched from must be one the
-		domain itself named in its signed manifest.
+		manifest names in its authority sequence.
 
-		This is what makes delegated authority safe. The a= observation that
-		sent us here is unauthenticated — anyone can publish a record pointing
-		at anyone. Without this check a hostile record would make every
-		resolver on the internet fetch from a victim host and, worse, could
-		let a manifest stolen from one authority be re-served from another.
-		With it, the domain's own signature decides where its manifests may
-		live: a misdirected request gets a 404 or a manifest whose consent
-		does not name the host we reached, and dies here.
+		For an established peer the identity signature authenticates this list;
+		for first contact the caller must have used the subject-domain WebPKI
+		endpoint rather than an untrusted a=. Together those rules prevent the
+		server from authorizing both itself and the identity introduced in its
+		response. The host check also stops a manifest from one eligible
+		authority being re-served from another.
 
 		Self-hosted manifests (no authority field) consent to exactly one
 		host — their own — which is the pre-delegation rule, unchanged.
@@ -527,7 +524,8 @@ manifest's.
 The body is returned raw. The caller walks it from its own pin; nothing here
 vouches for anything.
 */
-// authority mirrors Resolve's: the delegated authority hint ("" = self).
+// authority mirrors Resolve's: a delegated route already made eligible by the
+// caller's trust state ("" = subject-domain bootstrap).
 func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain, authority string) ([]byte, error) {
 	d, err := discovery.Normalize(domain)
 	if err != nil {
@@ -588,11 +586,10 @@ func (r *Resolver) ResolveIdentityChain(ctx context.Context, domain, authority s
 		return nil, mailkey.Failf(mailkey.FailureHTTP, d,
 			"the identity resource exceeds the %d byte limit", identity.MaxChainBytes)
 	}
-	// The identity plane's consent check, the twin of the manifest's: the
-	// document must name the host it came from. Without it a delegated fetch
-	// would accept an identity resource re-served from anywhere — and the
-	// identity plane is where pins and rotations are decided, so it is the
-	// last place that should trust an unauthenticated a=.
+	// The identity plane's routing consistency check: the document must name
+	// the host it came from. The head document is not signed, so this check does
+	// not authorize the route; the peer service only reaches a delegated host
+	// after an existing pin makes the observation eligible.
 	//
 	// Parsed here for the check only; the caller re-parses the same bytes for
 	// its own walk, which is deliberate — this function's contract is "the

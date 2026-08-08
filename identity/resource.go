@@ -67,14 +67,13 @@ type Doc struct {
 	Alg       string
 	Status    string
 	UpdatedAt time.Time
-	// Authority is the domain's CONSENT to have its identity served
-	// elsewhere — the same signed grant the manifest carries, on the identity
-	// plane. Empty means only the domain's own mail host may serve it.
+	// Authority declares where this identity resource is served. Empty means
+	// only the domain's own mail host.
 	//
-	// It matters here for the same reason it matters there: an unauthenticated
-	// a= decides which host is dialed, so the document must say for itself
-	// which hosts it may come from, or a stolen identity resource could be
-	// re-served from anywhere.
+	// The head document has no document-level signature, so this field is a
+	// routing consistency check, NOT authority to delegate and NOT evidence for
+	// first contact. Callers may use a delegated route only after an existing
+	// identity pin or a separate authenticated policy has made it eligible.
 	Authority []string
 	// Chain is the ordered transition history. Order is a courtesy to readers;
 	// WalkChain does not depend on it, and must not, because the order is
@@ -411,8 +410,8 @@ func boundedDocKeys(m value.Map, required, optional []string) error {
 	return nil
 }
 
-// docAuthorityField reads the optional signed authority sequence under the
-// same bounds PackDoc enforces.
+// docAuthorityField reads the optional authority sequence under the same bounds
+// PackDoc enforces. The containing head document is not itself signed.
 func docAuthorityField(m value.Map) ([]string, error) {
 	v := m.Get("authority")
 	if v == nil || v.Kind() == value.NULL {
@@ -445,9 +444,10 @@ func docAuthorityField(m value.Map) ([]string, error) {
 	return out, nil
 }
 
-// CheckAuthority enforces that fetchedHost is the mail host of an authority
-// the document itself names (or of its own domain, when it names none) — the
-// identity plane's half of the delegation consent rule.
+// CheckAuthority enforces that fetchedHost is the mail host the document
+// declares (or its own domain when it declares none). This is a consistency
+// check, not delegation authorization: the head document is unsigned and the
+// caller must have made the route eligible before fetching it.
 func CheckAuthority(d Doc, fetchedHost string) error {
 	allowed := d.Authority
 	if len(allowed) == 0 {
@@ -462,7 +462,7 @@ func CheckAuthority(d Doc, fetchedHost string) error {
 			return nil
 		}
 	}
-	return xerrors.Errorf("identity resource served by %q, which its signed authority does not name (%v)", fetchedHost, allowed)
+	return xerrors.Errorf("identity resource served by %q, which its declared authority does not name (%v)", fetchedHost, allowed)
 }
 
 // exactKeys fails closed on anything unrecognised: no unknown fields, none
